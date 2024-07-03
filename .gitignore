@@ -1,5 +1,5 @@
 /node_modules
-/wwebjs_auth
+/user_data
 /dist
 /log
 /src/config.ts

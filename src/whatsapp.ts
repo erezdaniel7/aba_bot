@@ -1,13 +1,12 @@
-import * as whatsapp from 'whatsapp-web.js';
+import puppeteer, { Page } from 'puppeteer';
 import qrcode from 'qrcode-terminal';
 import { Subject } from 'rxjs';
 
-import { config } from './config';
 import { Log } from './log';
 
 
 export class WhatsApp {
-    private client!: whatsapp.Client;
+    private page!: Page;
     private isReady$: Subject<boolean>;
 
     constructor() {
@@ -15,82 +14,59 @@ export class WhatsApp {
         this.init();
     }
 
-    private init() {
-        this.client = new whatsapp.Client({
-            webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-            },
-
-            authStrategy: new whatsapp.LocalAuth({
-                dataPath: 'wwebjs_auth'
-            }),
-
-            // puppeteer: {
-            //     headless: false
-            // }
+    private async init() {
+        const browser = await puppeteer.launch({
+            userDataDir: "./user_data",
+            // headless: false,
         });
+        this.page = await browser.newPage();
+        await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+        await this.page.setViewport({ width: 1080, height: 1024 });
+        await this.page.goto('https://web.whatsapp.com/');
 
-        this.client.on('qr', (qr: string) => {
-            // Generate and scan this code with your phone
-            Log.log('QR RECEIVED' + qr);
+        await this.page.waitForSelector('div._akau[data-ref], div#app', { timeout: 600000 });
+
+        if (!await this.page.$('div#app')) {
+            const qr = await (await this.page
+                .locator('div._akau[data-ref]')
+                .waitHandle())?.evaluate(el => el.getAttribute('data-ref'));
+            Log.log('QR RECEIVED: ' + qr);
             qrcode.generate(qr, { small: true });
-        });
+        }
 
-        this.client.on('ready', () => {
-            this.isReady$.next(true);
-            this.isReady$.complete();
-            Log.log('Whatsapp Client is ready!');
-            this.sendMessage(config.whatsApp.adminChatId, 'Hey admin! This is an automated message.');
-            this.sendMessage(config.whatsApp.testGroupChatId, 'Hey group! This is an automated message.');
-        });
+        await this.page.waitForSelector('div#app', { timeout: 600000 });
 
-        this.client.on('message', (msg) => this.onMessageReceived(msg));
-        this.client.initialize();
+        this.isReady$.next(true);
+        this.isReady$.complete();
+        Log.log('Whatsapp Client is ready!');
     }
 
-    public async sendMessage(chatId: string, content: whatsapp.MessageContent): Promise<whatsapp.Message> {
-        // await firstValueFrom(this.isReady$); // wait for client to be ready
+    public async sendMessage(chatAlias: string, content: string): Promise<boolean> {
         await this.isReady$.toPromise();
-        return this.client.sendMessage(chatId, content);
-    }
 
-    private async onMessageReceived(msg: whatsapp.Message) {
-        Log.log('MESSAGE RECEIVED:');
-        Log.log('msg.author:' + msg.author);
-        Log.log('msg.from:' + msg.from);
-        if (config.whatsApp.uers.includes(msg.from) || (msg.author && config.whatsApp.uers.includes(msg.author))) { // check if the message is from an authorized user
-            if (msg.author) { // if the message is from a group
-                if (msg.body.toLowerCase() == 'ping') {
-                    msg.reply('pong \n 🏓', msg.author || msg.from);
-                }
-            }
-            else { // if the message is from a private chat
-                if (['hi', 'hello'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                    await msg.reply('Hello!');
-                }
-                if (['bye', 'goodbye'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                    await msg.reply('Goodbye!');
-                }
-                if (['הי', 'שלום'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                    await msg.reply('שלום!');
-                }
-                if (['להתראות', 'ביי'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                    await msg.reply('להתראות!');
-                }
-                let count = msg.body.toLowerCase().split('ping').length - 1;
-                for (let i = 0; i < count; i++) {
-                    await msg.reply('pong \n 🏓');
-                }
-                count = msg.body.toLowerCase().split('פינג').length - 1;
-                for (let i = 0; i < count; i++) {
-                    await msg.reply('פונג \n 🏓');
-                }
+        await this.page.waitForSelector(`span[title="${chatAlias}"]`, { timeout: 600000 });
+        await this.page.click(`span[title="${chatAlias}"]`);
+        await sleep(10000);
 
-
+        const parts = content.split('\n');
+        for (let i = 0; i < parts.length; i++) {
+            await this.page.keyboard.type(parts[i]);
+            if (i < parts.length - 1) {
+                await this.page.keyboard.down('Control');
+                await this.page.keyboard.press('Enter');
+                await this.page.keyboard.up('Control');
             }
         }
+        await this.page.keyboard.press('Enter');
+
+        return true
     }
 
 
+
+
+}
+
+async function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }

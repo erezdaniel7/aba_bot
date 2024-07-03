@@ -1,15 +1,9 @@
 export const config = {
 
     whatsApp: {
-        adminChatId: '',
-        testGroupChatId: '',
-        groupChatId: '',
-        users: [
-            '',
-            '',
-            '',
-            '',
-        ]
+        adminChatAlias: 'Daniel Erez',
+        testGroupChatAlias: 'Bot test',
+        groupChatAlias: '...',
     },
 
     ics_list: [
