@@ -4,7 +4,6 @@ import { Subject } from 'rxjs';
 
 import { Log } from './log';
 
-
 export class WhatsApp {
     private page!: Page;
     private isReady$: Subject<boolean>;
@@ -21,12 +20,11 @@ export class WhatsApp {
         });
         this.page = await browser.newPage();
         await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
-        await this.page.setViewport({ width: 1080, height: 1024 });
         await this.page.goto('https://web.whatsapp.com/');
 
-        await this.page.waitForSelector('div._akau[data-ref], div#app', { timeout: 600000 });
+        await this.page.waitForSelector('div._akau[data-ref], ._ak9p', { timeout: 600000 });
 
-        if (!await this.page.$('div#app')) {
+        if (await this.page.$('div._akau[data-ref]')) {
             const qr = await (await this.page
                 .locator('div._akau[data-ref]')
                 .waitHandle())?.evaluate(el => el.getAttribute('data-ref'));
@@ -34,19 +32,25 @@ export class WhatsApp {
             qrcode.generate(qr, { small: true });
         }
 
-        await this.page.waitForSelector('div#app', { timeout: 600000 });
+        await this.page.waitForSelector('._ak9p', { timeout: 600000 });
 
         this.isReady$.next(true);
         this.isReady$.complete();
         Log.log('Whatsapp Client is ready!');
     }
 
-    public async sendMessage(chatAlias: string, content: string): Promise<boolean> {
+    public async sendMessage(chatAlias: string, content: string): Promise<void> {
         await this.isReady$.toPromise();
 
         await this.page.waitForSelector(`span[title="${chatAlias}"]`, { timeout: 600000 });
         await this.page.click(`span[title="${chatAlias}"]`);
-        await sleep(10000);
+
+        let isChatSelected = false;
+        do {
+            await sleep(1000); // Wait for 1 second before checking the value again
+            await this.page.waitForSelector(`header._amid`, { timeout: 600000 });
+            isChatSelected = (await this.page.$eval(`header._amid`, (element) => element.innerHTML)).includes(`>${chatAlias}</span>`);
+        } while (!isChatSelected);
 
         const parts = content.split('\n');
         for (let i = 0; i < parts.length; i++) {
@@ -58,12 +62,7 @@ export class WhatsApp {
             }
         }
         await this.page.keyboard.press('Enter');
-
-        return true
     }
-
-
-
 
 }
 
