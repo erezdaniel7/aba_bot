@@ -1,6 +1,6 @@
 import moment from 'moment';
 
-import { Sabbath } from './heDate/sabbath';
+import { ShabbatHug } from './heDate/shabbatHug';
 import { Calendar } from "./calendar";
 
 const HeDate = require('./heDate/heDate');
@@ -20,11 +20,11 @@ export class Message {
         if (holiday) message += '✡' + holiday + '✡\n';
         message += '\n';
 
-        const sabbathTime = Sabbath.getSabbathTime(moment(date).add(1, 'day'));
+        const sabbathTime = ShabbatHug.getShabatHugimDate(moment(date));
         if (sabbathTime) {
-            message += '🕯🕯' + sabbathTime['פרשת שבוע'] + '🕯🕯' + "\n" +
-                "הדלקת נרות: " + sabbathTime['הדלקת נרות'] + "\n" +
-                "צאת שבת: " + sabbathTime['צאת שבת'] + "\n\n";
+            if (sabbathTime['Parsha']) message += '📜' + sabbathTime['Parsha'] + '📜' + "\n";
+            message += '🕯הדלקת נרות: ' + sabbathTime['CandleLightingTime'].format('HH:mm') + '🕯' + "\n" +
+                '🌟צאת שבת: ' + sabbathTime['HavdalahTime'].format('HH:mm') + '🌟' + "\n\n";
         }
 
         const events = await this.calendar.getDailyEvents(date);
@@ -32,10 +32,20 @@ export class Message {
             message += "אין אירועים היום! 🎉🎉";
         }
         else {
-            message += "⭐בוקר טוב! הנה האירועים של היום:\n";
+            message += "📅בוקר טוב! הנה האירועים של היום:\n";
             message += events.map((event) => {
                 return '🔹' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
             }).join('\n');
+        }
+
+        if (sabbathTime) {
+            const tomorrowEvents = await this.calendar.getDailyEvents(moment(date).add(1, 'day'));
+            if (tomorrowEvents.length > 0) {
+                message += '\n\n📅 ואלו של מחר:\n';
+                message += tomorrowEvents.map((event) => {
+                    return '🔹' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
+                }).join('\n');
+            }
         }
 
         message += '\n\nזיכרו! ההודעה הזו קבועה אבל היומן תמיד מעודכן!! 😎';
