@@ -13,7 +13,7 @@ export class ShabbatHug {
 
     public static location = new Location(30.98822, 34.93176, true, 'Asia/Jerusalem');
 
-    public static getShabatHugimDate(date: moment.MomentInput): ShabbatHugData | null {
+    public static getShabatHugimData(date: moment.MomentInput): ShabbatHugData | null {
         const res: Partial<ShabbatHugData> = {};
         const events = HebrewCalendar.calendar({
             start: moment(date).toDate(),
@@ -29,7 +29,9 @@ export class ShabbatHug {
             noModern: true,
             noHolidays: true,
         });
-
+        if (events.length === 0) {
+            return null;
+        }
         for (const ev of events) {
             if (ev instanceof CandleLightingEvent && moment(date).isSame(ev.eventTime, 'date')) {
                 res.CandleLightingTime = moment(ev.eventTime);
@@ -44,7 +46,6 @@ export class ShabbatHug {
                 res.Parsha = ev.render('he');
             }
         }
-
         return res as ShabbatHugData;
     }
 

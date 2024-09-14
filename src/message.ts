@@ -20,7 +20,7 @@ export class Message {
         if (holiday) message += '✡' + holiday + '✡\n';
         message += '\n';
 
-        const sabbathTime = ShabbatHug.getShabatHugimDate(moment(date));
+        const sabbathTime = ShabbatHug.getShabatHugimData(moment(date));
         if (sabbathTime) {
             if (sabbathTime['Parsha']) message += '📜' + sabbathTime['Parsha'] + '📜' + "\n";
             message += '🕯הדלקת נרות: ' + sabbathTime['CandleLightingTime'].format('HH:mm') + '🕯' + "\n" +
