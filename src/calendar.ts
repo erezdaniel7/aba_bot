@@ -66,6 +66,10 @@ export class Calendar {
 
         events.sort((a, b) => { return moment(a.start).diff(moment(b.start)) });
 
-        return events;
+        // filter out events that are starting before the start of the day
+        // and not all day events
+        return events.filter((event) => {
+            return event.datetype === 'date' || moment(event.start).isBetween(start, end, undefined, '[)');
+        });
     }
 }
