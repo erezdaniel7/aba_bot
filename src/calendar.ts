@@ -33,15 +33,32 @@ export class Calendar {
                 if (event.rrule) {
                     // Calculate occurrences within a date range 
                     const occurrences = event.rrule.between(start.toDate(), moment(end).add(1, 'second').toDate());
+
                     if (occurrences.length > 0) {
                         occurrences.forEach((occurrence) => {
                             // if event is not rescheduled (will handle later) or deleted
-                            if (!event.recurrences?.[moment(occurrence).format('YYYY-MM-DD')] &&
-                                !event.exdate?.[moment(occurrence).format('YYYY-MM-DD')]) {
-                                // Adjust timezone
-                                const timeZoneOffset = event.rrule?.options.tzid ? moment.tz(event.start, event.rrule.options.tzid).utcOffset() - moment.tz(occurrence, event.rrule.options.tzid).utcOffset() : 0;
+                            // Use UTC date for consistent EXDATE comparison
+                            const occurrenceDate = moment.utc(occurrence).format('YYYY-MM-DD');
+
+                            if (!event.recurrences?.[occurrenceDate] &&
+                                !event.exdate?.[occurrenceDate]) {
+                                // The occurrence represents a UTC time, but we need to convert it to the same local time as the original event
+                                let adjustedStart: Date;
+
+                                if (event.rrule?.options.tzid) {
+                                    // Get the original event's local time
+                                    const originalLocal = moment.tz(event.start, event.rrule.options.tzid);
+                                    // Get the occurrence date in UTC
+                                    const occurrenceUTCDate = moment.utc(occurrence).format('YYYY-MM-DD');
+                                    // Combine the occurrence date with the original event's time
+                                    const targetLocal = moment.tz(`${occurrenceUTCDate} ${originalLocal.format('HH:mm:ss')}`, event.rrule.options.tzid);
+                                    adjustedStart = targetLocal.toDate();
+                                } else {
+                                    adjustedStart = occurrence;
+                                }
+
                                 let eventCopy = JSON.parse(JSON.stringify(event));
-                                eventCopy.start = moment(occurrence).add(timeZoneOffset, 'minutes').toDate();
+                                eventCopy.start = adjustedStart;
                                 events.push(eventCopy);
                             }
                         });

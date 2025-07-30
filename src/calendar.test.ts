@@ -15,7 +15,7 @@ describe('Calendar', () => {
             },
             log_file_path: 'log/log.log'
         }));
-        const Calendar = require('./Calendar').Calendar;
+        const Calendar = require('./calendar').Calendar;
         calendar = new Calendar();
     });
 
