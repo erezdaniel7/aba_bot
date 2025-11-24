@@ -49,9 +49,12 @@ export class WhatsApp {
         this.client.initialize();
     }
 
-    public async sendMessage(chatId: string, content: whatsapp.MessageContent): Promise<whatsapp.Message> {
+    public async sendMessage(chatId: string, content: whatsapp.MessageContent, options?: whatsapp.MessageSendOptions): Promise<whatsapp.Message> {
         // await firstValueFrom(this.isReady$); // wait for client to be ready
         await this.isReady$.toPromise();
+        if (options) {
+            return this.client.sendMessage(chatId, content, options);
+        }
         return this.client.sendMessage(chatId, content);
     }
 

@@ -1,5 +1,12 @@
 export const config = {
 
+    httpServer: {
+        port: 3000,
+        whitelistChatIds: [
+            '', // Add allowed chat IDs here
+        ]
+    },
+
     whatsApp: {
         adminChatId: '',
         testGroupChatId: '',
