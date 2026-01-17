@@ -37,6 +37,6 @@
     "puppeteer": "^24.31.0",
     "qrcode-terminal": "^0.12.0",
     "rxjs": "^7.8.2",
-    "whatsapp-web.js": "^1.34.2"
+    "whatsapp-web.js": "^1.34.4"
   }
 }
