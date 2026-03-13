@@ -39,8 +39,7 @@ export class WhatsApp {
 
         this.client = new whatsapp.Client({
             webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/AaylaSecura1138/wa-version/master/html/2.2500.1.html',
+                type: 'none',
             },
 
             authStrategy: new whatsapp.LocalAuth({
@@ -54,6 +53,22 @@ export class WhatsApp {
             }
         });
 
+        this.client.on('loading_screen', (percent: string, message: string) => {
+            Log.log(`WhatsApp loading: ${percent}% - ${message}`);
+        });
+
+        this.client.on('authenticated', () => {
+            Log.log('WhatsApp authenticated!');
+        });
+
+        this.client.on('auth_failure', (msg: string) => {
+            Log.log('WhatsApp auth failure: ' + msg);
+        });
+
+        this.client.on('disconnected', (reason: string) => {
+            Log.log('WhatsApp disconnected: ' + reason);
+        });
+
         this.client.on('qr', (qr: string) => {
             // Generate and scan this code with your phone
             Log.log('QR RECEIVED' + qr);
@@ -61,19 +76,6 @@ export class WhatsApp {
         });
 
         this.client.on('ready', async () => {
-            // Patch sendSeen to avoid markedUnread error
-            try {
-                await this.client.pupPage?.evaluate(() => {
-                    // @ts-ignore
-                    if (window.WWebJS && window.WWebJS.sendSeen) {
-                        // @ts-ignore
-                        window.WWebJS.sendSeen = function () { return Promise.resolve(true); };
-                    }
-                });
-            } catch (e) {
-                Log.log('Failed to patch sendSeen: ' + (e as Error).message);
-            }
-
             this.isReady$.next(true);
             this.isReady$.complete();
             Log.log('Whatsapp Client is ready!');
@@ -83,7 +85,40 @@ export class WhatsApp {
 
         this.client.on('message', (msg) => this.onMessageReceived(msg));
 
-        this.client.initialize().catch((error) => {
+        this.client.initialize().then(async () => {
+            // Log browser-level info after initialize resolves
+            const page = this.client.pupPage;
+            if (page) {
+                page.on('console', (msg: any) => Log.log('BROWSER CONSOLE: ' + msg.text()));
+                page.on('pageerror', (err: any) => Log.log('BROWSER ERROR: ' + err.message));
+                Log.log('Puppeteer page URL: ' + page.url());
+
+                // Check WWeb version and Store injection status
+                try {
+                    const version = await page.evaluate('window.Debug?.VERSION');
+                    const hasStore = await page.evaluate('typeof window.Store !== "undefined"');
+                    const hasWWebJS = await page.evaluate('typeof window.WWebJS !== "undefined"');
+                    Log.log(`WWeb Version: ${version}, Store injected: ${hasStore}, WWebJS injected: ${hasWWebJS}`);
+                } catch (e) {
+                    Log.log('Failed to check injection status: ' + (e as Error).message);
+                }
+
+                // Periodic check to see what's happening
+                const checkInterval = setInterval(async () => {
+                    try {
+                        const url = page.url();
+                        const title = await page.title();
+                        Log.log(`Page check - URL: ${url}, Title: ${title}`);
+                    } catch (e) {
+                        Log.log('Page check failed: ' + (e as Error).message);
+                        clearInterval(checkInterval);
+                    }
+                }, 10000);
+
+                // Clear interval once ready
+                this.isReady$.subscribe({ complete: () => clearInterval(checkInterval) });
+            }
+        }).catch((error) => {
             Log.log('Failed to initialize WhatsApp client: ' + (error as Error).message);
         });
     }
@@ -117,6 +152,14 @@ export class WhatsApp {
     }
 
     private async onMessageReceived(msg: whatsapp.Message) {
+        // Mark the message as read
+        try {
+            const chat = await msg.getChat();
+            await chat.sendSeen();
+        } catch (error) {
+            Log.log('Error marking message as read: ' + (error as Error).message);
+        }
+
         Log.log('MESSAGE RECEIVED:');
         Log.log('msg.author:' + msg.author);
         Log.log('msg.from:' + msg.from);
