@@ -4,6 +4,7 @@ import { Subject } from 'rxjs';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execSync } from 'child_process';
 
 import { config } from './config';
 import { Log } from './log';
@@ -36,6 +37,32 @@ export class WhatsApp {
 
     private init() {
         const chromePath = getChromePath();
+
+        // Clean up stale browser lock to prevent "browser is already running" errors on restart
+        const sessionDir = path.join(__dirname, '..', 'wwebjs_auth', 'session');
+        const lockFile = path.join(sessionDir, 'lockfile');
+        if (fs.existsSync(lockFile)) {
+            try {
+                fs.unlinkSync(lockFile);
+                Log.log('Removed stale browser lockfile');
+            } catch (e) {
+                // Lockfile is held by a running Chrome — kill Chrome processes using this session
+                Log.log('Lockfile is busy, killing old Chrome processes...');
+                try {
+                    const sessionDirNorm = sessionDir.replace(/\//g, '\\');
+                    execSync(`wmic process where "commandline like '%${sessionDirNorm.replace(/\\/g, '\\\\')}%' and name='chrome.exe'" call terminate`, { timeout: 10000 });
+                    Log.log('Terminated old Chrome processes');
+                } catch { /* no matching processes, or wmic unavailable */ }
+                try {
+                    fs.unlinkSync(lockFile);
+                    Log.log('Removed lockfile after killing Chrome');
+                } catch (e2) {
+                    if ((e2 as NodeJS.ErrnoException).code !== 'ENOENT') {
+                        Log.log('Still could not remove lockfile: ' + (e2 as Error).message);
+                    }
+                }
+            }
+        }
 
         this.client = new whatsapp.Client({
             webVersionCache: {
@@ -152,6 +179,11 @@ export class WhatsApp {
     }
 
     private async onMessageReceived(msg: whatsapp.Message) {
+        // Ignore newsletter/channel messages - they don't support chat operations
+        if (msg.from.endsWith('@newsletter')) {
+            return;
+        }
+
         // Mark the message as read
         try {
             const chat = await msg.getChat();
