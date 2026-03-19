@@ -1,6 +1,5 @@
 import * as whatsapp from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
-import { Subject } from 'rxjs';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -26,13 +25,101 @@ function getChromePath(): string {
     return '';
 }
 
+const RESTART_DELAY_MS = 15_000;
+const HEALTH_CHECK_INTERVAL_MS = 30_000;
+const HEALTH_CHECK_TIMEOUT_MS = 10_000;
+
 export class WhatsApp {
     private client!: whatsapp.Client;
-    private isReady$: Subject<boolean>;
+    private readyPromise!: Promise<void>;
+    private readyResolve!: () => void;
+    private isReady = false;
+    private isRestarting = false;
+    private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
 
     constructor() {
-        this.isReady$ = new Subject<boolean>();
+        this.resetReadyPromise();
         this.init();
+    }
+
+    private resetReadyPromise() {
+        this.isReady = false;
+        this.readyPromise = new Promise<void>((resolve) => {
+            this.readyResolve = resolve;
+        });
+    }
+
+    private async restart(reason: string) {
+        if (this.isRestarting) return;
+        this.isRestarting = true;
+        this.resetReadyPromise();
+
+        Log.log(`Restarting WhatsApp client (reason: ${reason})...`);
+
+        this.stopHealthCheck();
+
+        try {
+            await this.client.destroy();
+            Log.log('Old client destroyed');
+        } catch (e) {
+            Log.log('Error destroying old client: ' + (e as Error).message);
+        }
+
+        // Wait before reinitializing to let network/browser settle
+        await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
+        this.isRestarting = false;
+        this.init();
+    }
+
+    private startHealthCheck() {
+        this.stopHealthCheck();
+        this.healthCheckTimer = setInterval(() => this.checkHealth(), HEALTH_CHECK_INTERVAL_MS);
+    }
+
+    private stopHealthCheck() {
+        if (this.healthCheckTimer) {
+            clearInterval(this.healthCheckTimer);
+            this.healthCheckTimer = null;
+        }
+    }
+
+    private async checkHealth() {
+        if (!this.isReady || this.isRestarting) return;
+
+        try {
+            const page = this.client.pupPage;
+            if (!page || page.isClosed()) {
+                this.restart('browser page closed');
+                return;
+            }
+
+            // Evaluate with a timeout to detect frozen/stale browser (e.g. after sleep)
+            const ok = await Promise.race([
+                page.evaluate('navigator.onLine').then(() => true),
+                new Promise<false>((resolve) => setTimeout(() => resolve(false), HEALTH_CHECK_TIMEOUT_MS)),
+            ]);
+
+            if (!ok) {
+                this.restart('browser not responding (possible sleep/wake)');
+                return;
+            }
+
+            // Check if WhatsApp state is still connected
+            const state = await Promise.race([
+                this.client.getState(),
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), HEALTH_CHECK_TIMEOUT_MS)),
+            ]);
+
+            if (state === null) {
+                this.restart('getState timed out');
+            } else if (state !== 'CONNECTED') {
+                Log.log('WhatsApp state: ' + state);
+                this.restart('WhatsApp state is ' + state);
+            }
+        } catch (e) {
+            Log.log('Health check error: ' + (e as Error).message);
+            this.restart('health check failed');
+        }
     }
 
     private init() {
@@ -90,10 +177,12 @@ export class WhatsApp {
 
         this.client.on('auth_failure', (msg: string) => {
             Log.log('WhatsApp auth failure: ' + msg);
+            this.restart('auth failure');
         });
 
         this.client.on('disconnected', (reason: string) => {
             Log.log('WhatsApp disconnected: ' + reason);
+            this.restart('disconnected: ' + reason);
         });
 
         this.client.on('qr', (qr: string) => {
@@ -103,9 +192,10 @@ export class WhatsApp {
         });
 
         this.client.on('ready', async () => {
-            this.isReady$.next(true);
-            this.isReady$.complete();
+            this.isReady = true;
+            this.readyResolve();
             Log.log('Whatsapp Client is ready!');
+            this.startHealthCheck();
             this.sendMessage(config.whatsApp.adminChatId, 'Hey admin! This is an automated message.');
             this.sendMessage(config.whatsApp.testGroupChatId, 'Hey group! This is an automated message.');
         });
@@ -129,29 +219,15 @@ export class WhatsApp {
                 } catch (e) {
                     Log.log('Failed to check injection status: ' + (e as Error).message);
                 }
-
-                // Periodic check to see what's happening
-                const checkInterval = setInterval(async () => {
-                    try {
-                        const url = page.url();
-                        const title = await page.title();
-                        Log.log(`Page check - URL: ${url}, Title: ${title}`);
-                    } catch (e) {
-                        Log.log('Page check failed: ' + (e as Error).message);
-                        clearInterval(checkInterval);
-                    }
-                }, 10000);
-
-                // Clear interval once ready
-                this.isReady$.subscribe({ complete: () => clearInterval(checkInterval) });
             }
         }).catch((error) => {
             Log.log('Failed to initialize WhatsApp client: ' + (error as Error).message);
+            this.restart('init failed');
         });
     }
 
     public async sendMessage(chatId: string, content: whatsapp.MessageContent, options?: whatsapp.MessageSendOptions): Promise<whatsapp.Message | null> {
-        await this.isReady$.toPromise();
+        await this.readyPromise;
         try {
             return await this.client.sendMessage(chatId, content, { sendSeen: false, ...options });
         } catch (error) {
