@@ -17,14 +17,12 @@ A WhatsApp bot that automatically sends daily calendar schedules and Jewish date
 - **Shabbat / Holiday Awareness** — Automatically skips sending messages on Shabbat and holidays (Issur Melacha). On Erev Shabbat, includes the next day's events as well.
 - **Shabbat Times** — Displays candle lighting and Havdalah times, plus the weekly Parsha.
 - **Recurring Event Support** — Properly handles recurring calendar events (RRULE), including rescheduled and deleted occurrences.
-- **Interactive Chat Commands** — Responds to authorized users in private or group chats:
-  - `hi` / `hello` / `הי` / `שלום` — Greeting
-  - `bye` / `goodbye` / `להתראות` / `ביי` — Farewell
-  - `ping` / `פינג` — Pong reply (supports multiple pings in one message)
+- **Private AI Replies** — Responds only to authorized private chats using Azure OpenAI, with context from today's Jewish date data, Shabbat info, holidays, and upcoming calendar events.
+- **Conversation Memory** — Keeps per-user conversation history so private AI replies can use recent chat context together with calendar data.
 - **HTTP API** — An Express HTTP server exposes a `POST /send-message` endpoint to send text or image messages programmatically.
 - **WhatsApp QR Authentication** — On first run, a QR code is displayed in the terminal for linking with WhatsApp Web. Session is persisted locally for subsequent runs.
 - **Windows Service Support** — Can be installed as a Windows service via `node-windows`.
-- **AI-Powered Messages** — Optionally uses Azure OpenAI (GPT-4.1-mini) to generate creative, warm morning messages instead of the static template. Enabled by default; can be toggled per call.
+- **AI-Powered Daily Messages** — Optionally uses Azure OpenAI (GPT-4.1-mini) to generate creative, warm morning messages instead of the static template. Enabled by default; can be toggled per call.
 - **Logging** — All activity is logged to both the console and a log file.
 
 ## Prerequisites
@@ -201,9 +199,10 @@ src/
 ├── index.ts            # Entry point — scheduling & startup
 ├── config.ts           # Configuration (your copy with real values)
 ├── config.simple.ts    # Configuration template
-├── calendar.ts         # ICS calendar fetching & event parsing
+├── calendar.ts         # ICS calendar fetching, caching, and message data collection
 ├── message.ts          # Daily message generation (with/without AI)
 ├── aiMessageGenerator.ts # Azure OpenAI client wrapper
+├── chatHistory.ts      # Per-user private chat context memory
 ├── whatsapp.ts         # WhatsApp Web client wrapper
 ├── httpServer.ts       # Express HTTP API
 ├── log.ts              # File & console logging

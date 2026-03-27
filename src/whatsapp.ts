@@ -7,6 +7,10 @@ import { execSync } from 'child_process';
 
 import { config } from './config';
 import { Log } from './log';
+import { Calendar } from './calendar';
+import { AiMessageGenerator } from './aiMessageGenerator';
+import { ChatHistory } from './chatHistory';
+import moment from 'moment';
 
 // Chrome paths to check (in order of priority)
 const CHROME_PATHS = [
@@ -36,6 +40,9 @@ export class WhatsApp {
     private isReady = false;
     private isRestarting = false;
     private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+    private calendar = new Calendar();
+    private aiMessageGenerator = new AiMessageGenerator();
+    private chatHistory = new ChatHistory();
 
     constructor() {
         this.resetReadyPromise();
@@ -255,8 +262,13 @@ export class WhatsApp {
     }
 
     private async onMessageReceived(msg: whatsapp.Message) {
-        // Ignore newsletter/channel messages - they don't support chat operations
+        // Ignore newsletter/channel messages
         if (msg.from.endsWith('@newsletter')) {
+            return;
+        }
+
+        // Ignore group messages — only reply to private chats
+        if (msg.author) {
             return;
         }
 
@@ -269,45 +281,89 @@ export class WhatsApp {
         }
 
         Log.log('MESSAGE RECEIVED:');
-        Log.log('msg.author:' + msg.author);
         Log.log('msg.from:' + msg.from);
 
-        // Check authorization
-        let isAuthorized = false;
-
-        if (msg.author) {
-            // Group message - get the contact's phone number to check authorization
-            const contact = await msg.getContact();
-            const phoneId = contact.number + '@c.us';
-            isAuthorized = config.whatsApp.users.includes(phoneId);
-            Log.log('Group message from: ' + phoneId + ', authorized: ' + isAuthorized);
-        } else {
-            // Private chat
-            isAuthorized = config.whatsApp.users.includes(msg.from);
+        // Check authorization (private chat only)
+        if (!config.whatsApp.users.includes(msg.from)) {
+            return;
         }
 
-        if (isAuthorized) {
-            // Handle all messages (both private and group)
-            if (['hi', 'hello'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                await this.safeReply(msg, 'Hello!');
+        try {
+            const calendarData = await this.calendar.collectData(moment(), { useCache: true, daysAhead: 7 });
+
+            const upcomingEventsText = calendarData.upcomingDays.map((day) => {
+                const dayDetails: string[] = [
+                    `תאריך לועזי: ${day.formattedDate}`,
+                    `תאריך עברי: ${day.heDate}`,
+                ];
+
+                if (day.holiday) {
+                    dayDetails.push(`חג/מועד: ${day.holiday}`);
+                }
+
+                if (day.sabbathTime) {
+                    if (day.sabbathTime['Parsha']) {
+                        dayDetails.push(`פרשת השבוע: ${day.sabbathTime['Parsha']}`);
+                    }
+                    dayDetails.push(`הדלקת נרות: ${day.sabbathTime['CandleLightingTime'].format('HH:mm')}`);
+                    dayDetails.push(`צאת שבת: ${day.sabbathTime['HavdalahTime'].format('HH:mm')}`);
+                }
+
+                if (day.events.length === 0) {
+                    dayDetails.push('אירועים: אין אירועים.');
+                    return dayDetails.join('\n');
+                }
+
+                const eventsText = day.events.map((event) => {
+                    return '- ' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
+                }).join('\n');
+
+                dayDetails.push(`אירועים:\n${eventsText}`);
+                return dayDetails.join('\n');
+            }).join('\n\n');
+
+            let dailyContext = `תאריך עברי: ${calendarData.heDate}\n`;
+            dailyContext += `תאריך לועזי: ${calendarData.formattedDate}\n`;
+
+            if (calendarData.holiday) {
+                dailyContext += `חג/מועד: ${calendarData.holiday}\n`;
             }
-            if (['bye', 'goodbye'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                await this.safeReply(msg, 'Goodbye!');
+
+            if (calendarData.sabbathTime) {
+                if (calendarData.sabbathTime['Parsha']) {
+                    dailyContext += `פרשת השבוע: ${calendarData.sabbathTime['Parsha']}\n`;
+                }
+                dailyContext += `הדלקת נרות: ${calendarData.sabbathTime['CandleLightingTime'].format('HH:mm')}\n`;
+                dailyContext += `צאת שבת: ${calendarData.sabbathTime['HavdalahTime'].format('HH:mm')}\n`;
             }
-            if (['הי', 'שלום'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                await this.safeReply(msg, 'שלום!');
-            }
-            if (['להתראות', 'ביי'].some(keyword => msg.body.toLowerCase().includes(keyword))) {
-                await this.safeReply(msg, 'להתראות!');
-            }
-            let count = msg.body.toLowerCase().split('ping').length - 1;
-            for (let i = 0; i < count; i++) {
-                await this.safeReply(msg, 'pong \n 🏓');
-            }
-            count = msg.body.toLowerCase().split('פינג').length - 1;
-            for (let i = 0; i < count; i++) {
-                await this.safeReply(msg, 'פונג \n 🏓');
-            }
+
+            const systemPrompt = `אתה בוט וואטסאפ ידידותי של משפחה ישראלית. אתה עונה בעברית.
+יש לך גישה ללוח השנה המשפחתי של היום ושל הימים הקרובים.
+ענה על הודעות בצורה חמה, ידידותית וקצרה.
+אם השאלה קשורה ללוח זמנים או אירועים, השתמש במידע מלוח השנה.
+אם השאלה לא קשורה ללוח, ענה בצורה כללית וידידותית.
+
+מידע על היום:
+${dailyContext}
+
+אירועים ל-7 הימים הקרובים:
+${upcomingEventsText}`;
+
+            this.chatHistory.addMessage(msg.from, 'user', msg.body);
+
+            const history = this.chatHistory.getHistory(msg.from);
+            // Build conversation context from history (exclude the last user message, it's the current prompt)
+            const conversationMessages = history.slice(0, -1).map(entry => ({
+                role: entry.role as 'user' | 'assistant',
+                content: entry.content,
+            }));
+
+            const reply = await this.aiMessageGenerator.generateMessage(msg.body, systemPrompt, conversationMessages);
+
+            this.chatHistory.addMessage(msg.from, 'assistant', reply);
+            await this.safeReply(msg, reply);
+        } catch (error) {
+            Log.log('Error generating AI reply: ' + (error as Error).message);
         }
     }
 }

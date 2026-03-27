@@ -14,11 +14,12 @@ export class AiMessageGenerator {
         });
     }
 
-    async generateMessage(prompt: string, systemPrompt: string): Promise<string> {
+    async generateMessage(prompt: string, systemPrompt: string, conversationHistory: { role: 'user' | 'assistant'; content: string }[] = []): Promise<string> {
         const response = await this.client.chat.completions.create({
             model: config.azureOpenAI.deploymentName,
             messages: [
                 { role: 'system', content: systemPrompt },
+                ...conversationHistory,
                 { role: 'user', content: prompt },
             ],
         });
