@@ -24,6 +24,7 @@ A WhatsApp bot that automatically sends daily calendar schedules and Jewish date
 - **HTTP API** — An Express HTTP server exposes a `POST /send-message` endpoint to send text or image messages programmatically.
 - **WhatsApp QR Authentication** — On first run, a QR code is displayed in the terminal for linking with WhatsApp Web. Session is persisted locally for subsequent runs.
 - **Windows Service Support** — Can be installed as a Windows service via `node-windows`.
+- **AI-Powered Messages** — Optionally uses Azure OpenAI (GPT-4.1-mini) to generate creative, warm morning messages instead of the static template. Enabled by default; can be toggled per call.
 - **Logging** — All activity is logged to both the console and a log file.
 
 ## Prerequisites
@@ -31,6 +32,7 @@ A WhatsApp bot that automatically sends daily calendar schedules and Jewish date
 - **Node.js** (v18 or later recommended)
 - **Google Chrome** installed (used by Puppeteer for WhatsApp Web)
 - **WhatsApp account** to link with the bot
+- **Azure OpenAI resource** (optional, for AI-generated messages) — [Create one via Azure CLI](#azure-openai-setup)
 
 ## Installation
 
@@ -77,6 +79,13 @@ export const config = {
         // Add more ICS calendar URLs here
     ],
 
+    azureOpenAI: {
+        endpoint: 'https://....api.cognitive.microsoft.com/',  // Azure OpenAI endpoint
+        apiKey: 'your-api-key',                                // Azure OpenAI API key
+        deploymentName: 'your-deployment',                     // Model deployment name
+        apiVersion: '2024-12-01-preview',                      // API version
+    },
+
     log_file_path: 'log/log.log'        // Path to the log file
 };
 ```
@@ -92,7 +101,34 @@ export const config = {
 | `whatsApp.groupChatId` | Main WhatsApp group for daily messages |
 | `whatsApp.users` | List of authorized WhatsApp user IDs that can interact with the bot |
 | `ics_list` | Array of ICS calendar URLs to fetch events from |
+| `azureOpenAI.endpoint` | Azure OpenAI resource endpoint URL |
+| `azureOpenAI.apiKey` | Azure OpenAI API key |
+| `azureOpenAI.deploymentName` | Name of the deployed model (e.g. `aba-bot`) |
+| `azureOpenAI.apiVersion` | Azure OpenAI API version |
 | `log_file_path` | File path for the log output |
+
+### Azure OpenAI Setup
+
+To enable AI-generated messages, create an Azure OpenAI resource and deploy a model:
+
+```bash
+# Create a resource group (or use an existing one)
+az group create --name aba-bot-rg --location swedencentral
+
+# Create the Azure OpenAI resource
+az cognitiveservices account create --name aba-bot-openai --resource-group aba-bot-rg --kind OpenAI --sku S0 --location swedencentral
+
+# Deploy a model
+az cognitiveservices account deployment create --name aba-bot-openai --resource-group aba-bot-rg --deployment-name aba-bot --model-name gpt-4.1-mini --model-version "2025-04-14" --model-format OpenAI --sku-capacity 10 --sku-name "GlobalStandard"
+
+# Get the API key
+az cognitiveservices account keys list --name aba-bot-openai --resource-group aba-bot-rg --query "key1" -o tsv
+
+# Get the endpoint
+az cognitiveservices account show --name aba-bot-openai --resource-group aba-bot-rg --query "properties.endpoint" -o tsv
+```
+
+Copy the endpoint and key into `config.ts` under `azureOpenAI`.
 
 > **Tip:** To find chat IDs, you can check the bot logs after receiving a message — the sender's chat ID is logged.
 
@@ -166,7 +202,8 @@ src/
 ├── config.ts           # Configuration (your copy with real values)
 ├── config.simple.ts    # Configuration template
 ├── calendar.ts         # ICS calendar fetching & event parsing
-├── message.ts          # Daily message generation
+├── message.ts          # Daily message generation (with/without AI)
+├── aiMessageGenerator.ts # Azure OpenAI client wrapper
 ├── whatsapp.ts         # WhatsApp Web client wrapper
 ├── httpServer.ts       # Express HTTP API
 ├── log.ts              # File & console logging
@@ -185,6 +222,7 @@ src/
 - **node-schedule** — Cron-like job scheduling
 - **Express** — HTTP API server
 - **Moment.js** / **moment-timezone** — Date handling
+- **openai** — Azure OpenAI SDK
 - **node-windows** — Windows service installer
 
 ## License

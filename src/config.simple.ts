@@ -19,6 +19,13 @@ export const config = {
         ]
     },
 
+    azureOpenAI: {
+        endpoint: '',
+        apiKey: '',
+        deploymentName: '',
+        apiVersion: '2024-12-01-preview',
+    },
+
     ics_list: [
         'https://calendar.google.com/calendar/ical/....',
     ],
