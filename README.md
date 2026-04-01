@@ -17,8 +17,10 @@ A WhatsApp bot that automatically sends daily calendar schedules and Jewish date
 - **Shabbat / Holiday Awareness** — Automatically skips sending messages on Shabbat and holidays (Issur Melacha). On Erev Shabbat, includes the next day's events as well.
 - **Shabbat Times** — Displays candle lighting and Havdalah times, plus the weekly Parsha.
 - **Recurring Event Support** — Properly handles recurring calendar events (RRULE), including rescheduled and deleted occurrences.
-- **Private AI Replies** — Responds only to authorized private chats using Azure OpenAI, with context from today's Jewish date data, Shabbat info, holidays, and upcoming calendar events.
-- **Conversation Memory** — Keeps per-user conversation history so private AI replies can use recent chat context together with calendar data.
+- **Private AI Replies** — Responds only to authorized private chats using Azure OpenAI, with context from today's Jewish date data, Shabbat info, holidays, upcoming calendar events, and the identified family member behind the current chat.
+- **Conversation Memory** — Keeps per-user conversation history and a rolling user summary so private AI replies can use recent chat context together with calendar data, and persists both to JSON files across restarts.
+- **Family Context** — Uses configurable family-level context, member names, relation, gender, phone-to-name mapping, and short notes about each family member in both daily messages and private AI replies.
+- **AI Debug Logging** — Writes AI prompts, tool calls, tool results, and final responses to a dedicated log file for troubleshooting.
 - **HTTP API** — An Express HTTP server exposes a `POST /send-message` endpoint to send text or image messages programmatically.
 - **WhatsApp QR Authentication** — On first run, a QR code is displayed in the terminal for linking with WhatsApp Web. Session is persisted locally for subsequent runs.
 - **Windows Service Support** — Can be installed as a Windows service via `node-windows`.
@@ -72,10 +74,18 @@ export const config = {
         ]
     },
 
-    ics_list: [
-        'https://calendar.google.com/calendar/ical/.../basic.ics',  // Google Calendar ICS URL
-        // Add more ICS calendar URLs here
-    ],
+    family: {
+        description: 'Short shared context about the family.',
+        members: [
+            {
+                relation: 'Dad',
+                name: 'Daniel',
+                gender: 'male',
+                phoneNumber: '972XXXXXXXXX@c.us',
+                shortDescription: 'Short helpful info about this family member.',
+            },
+        ],
+    },
 
     azureOpenAI: {
         endpoint: 'https://....api.cognitive.microsoft.com/',  // Azure OpenAI endpoint
@@ -84,7 +94,18 @@ export const config = {
         apiVersion: '2024-12-01-preview',                      // API version
     },
 
-    log_file_path: 'log/log.log'        // Path to the log file
+    ics_list: [
+        'https://calendar.google.com/calendar/ical/.../basic.ics',  // Google Calendar ICS URL
+        // Add more ICS calendar URLs here
+    ],
+
+    conversation: {
+        userSummariesFilePath: 'data/user-summaries.json', // Persistent per-user summaries
+        chatHistoryFilePath: 'data/chat-history.json',     // Persistent chat history
+    },
+
+    log_file_path: 'log/log.log',       // Path to the general log file
+    ai_log_file_path: 'log/ai.log'      // Path to the AI debug log file
 };
 ```
 
@@ -98,12 +119,25 @@ export const config = {
 | `whatsApp.testGroupChatId` | Test WhatsApp group for development/testing |
 | `whatsApp.groupChatId` | Main WhatsApp group for daily messages |
 | `whatsApp.users` | List of authorized WhatsApp user IDs that can interact with the bot |
+| `family.description` | Shared context about the family that is injected into AI prompts |
+| `family.members` | Family member list with relation, name, optional gender, chat ID/phone mapping, and short personal context |
+| `family.members[].phoneNumber` | Used to map the active private chat to a known family member, so the AI knows who is currently speaking |
 | `ics_list` | Array of ICS calendar URLs to fetch events from |
+| `conversation.userSummariesFilePath` | JSON file path for persisted per-user summaries |
+| `conversation.chatHistoryFilePath` | JSON file path for persisted chat history |
 | `azureOpenAI.endpoint` | Azure OpenAI resource endpoint URL |
 | `azureOpenAI.apiKey` | Azure OpenAI API key |
 | `azureOpenAI.deploymentName` | Name of the deployed model (e.g. `aba-bot`) |
 | `azureOpenAI.apiVersion` | Azure OpenAI API version |
 | `log_file_path` | File path for the log output |
+| `ai_log_file_path` | File path for AI debug logs including prompts and tool calls |
+
+### Family Context Notes
+
+- The bot uses `family.members[].phoneNumber` to identify the current user in private chats.
+- Keep `relation`, `name`, and `gender` explicit rather than embedding them into one display string.
+- Put only stable, useful details in `shortDescription`, such as school, hobbies, recurring interests, or family responsibilities.
+- Avoid temporary facts in `shortDescription`; those belong in calendar data or conversation history, not static family config.
 
 ### Azure OpenAI Setup
 

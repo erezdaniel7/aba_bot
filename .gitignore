@@ -2,4 +2,5 @@
 /wwebjs_auth
 /dist
 /log
+/data
 /src/config.ts

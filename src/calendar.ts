@@ -142,7 +142,7 @@ export class Calendar {
         const holiday = getJwishHoliday(heDate);
         const sabbathTime = ShabbatHug.getShabatHugimData(moment(targetDate));
         const events = await this.getDailyEvents(targetDate, useCache);
-        const tomorrowEvents = sabbathTime
+        const tomorrowEvents = sabbathTime && daysAhead > 1
             ? await this.getDailyEvents(moment(targetDate).add(1, 'day'), useCache)
             : [];
 

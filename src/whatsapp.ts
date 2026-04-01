@@ -6,11 +6,8 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 
 import { config } from './config';
+import { Conversation } from './conversation';
 import { Log } from './log';
-import { Calendar } from './calendar';
-import { AiMessageGenerator } from './aiMessageGenerator';
-import { ChatHistory } from './chatHistory';
-import moment from 'moment';
 
 // Chrome paths to check (in order of priority)
 const CHROME_PATHS = [
@@ -40,9 +37,7 @@ export class WhatsApp {
     private isReady = false;
     private isRestarting = false;
     private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
-    private calendar = new Calendar();
-    private aiMessageGenerator = new AiMessageGenerator();
-    private chatHistory = new ChatHistory();
+    private conversation = new Conversation();
 
     constructor() {
         this.resetReadyPromise();
@@ -236,7 +231,13 @@ export class WhatsApp {
     public async sendMessage(chatId: string, content: whatsapp.MessageContent, options?: whatsapp.MessageSendOptions): Promise<whatsapp.Message | null> {
         await this.readyPromise;
         try {
-            return await this.client.sendMessage(chatId, content, { sendSeen: false, ...options });
+            const sentMessage = await this.client.sendMessage(chatId, content, { sendSeen: false, ...options });
+
+            if (chatId === config.whatsApp.groupChatId) {
+                this.conversation.recordFamilyGroupAssistantMessage(this.describeOutgoingMessage(content, options));
+            }
+
+            return sentMessage;
         } catch (error) {
             Log.log('Error sending message: ' + (error as Error).message);
             return null;
@@ -267,6 +268,10 @@ export class WhatsApp {
             return;
         }
 
+        if (msg.from === config.whatsApp.groupChatId && msg.author) {
+            this.conversation.recordFamilyGroupUserMessage(msg.author, msg.body);
+        }
+
         // Ignore group messages — only reply to private chats
         if (msg.author) {
             return;
@@ -289,81 +294,22 @@ export class WhatsApp {
         }
 
         try {
-            const calendarData = await this.calendar.collectData(moment(), { useCache: true, daysAhead: 7 });
-
-            const upcomingEventsText = calendarData.upcomingDays.map((day) => {
-                const dayDetails: string[] = [
-                    `תאריך לועזי: ${day.formattedDate}`,
-                    `תאריך עברי: ${day.heDate}`,
-                ];
-
-                if (day.holiday) {
-                    dayDetails.push(`חג/מועד: ${day.holiday}`);
-                }
-
-                if (day.sabbathTime) {
-                    if (day.sabbathTime['Parsha']) {
-                        dayDetails.push(`פרשת השבוע: ${day.sabbathTime['Parsha']}`);
-                    }
-                    dayDetails.push(`הדלקת נרות: ${day.sabbathTime['CandleLightingTime'].format('HH:mm')}`);
-                    dayDetails.push(`צאת שבת: ${day.sabbathTime['HavdalahTime'].format('HH:mm')}`);
-                }
-
-                if (day.events.length === 0) {
-                    dayDetails.push('אירועים: אין אירועים.');
-                    return dayDetails.join('\n');
-                }
-
-                const eventsText = day.events.map((event) => {
-                    return '- ' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
-                }).join('\n');
-
-                dayDetails.push(`אירועים:\n${eventsText}`);
-                return dayDetails.join('\n');
-            }).join('\n\n');
-
-            let dailyContext = `תאריך עברי: ${calendarData.heDate}\n`;
-            dailyContext += `תאריך לועזי: ${calendarData.formattedDate}\n`;
-
-            if (calendarData.holiday) {
-                dailyContext += `חג/מועד: ${calendarData.holiday}\n`;
-            }
-
-            if (calendarData.sabbathTime) {
-                if (calendarData.sabbathTime['Parsha']) {
-                    dailyContext += `פרשת השבוע: ${calendarData.sabbathTime['Parsha']}\n`;
-                }
-                dailyContext += `הדלקת נרות: ${calendarData.sabbathTime['CandleLightingTime'].format('HH:mm')}\n`;
-                dailyContext += `צאת שבת: ${calendarData.sabbathTime['HavdalahTime'].format('HH:mm')}\n`;
-            }
-
-            const systemPrompt = `אתה "אבא בוט" בוט וואטסאפ ידידותי של משפחה ישראלית. אתה עונה בעברית.
-יש לך גישה ללוח השנה המשפחתי של היום ושל הימים הקרובים.
-ענה על הודעות בצורה חמה, ידידותית וקצרה.
-אם השאלה קשורה ללוח זמנים או אירועים, השתמש במידע מלוח השנה.
-אם השאלה לא קשורה ללוח, ענה בצורה כללית וידידותית.
-
-מידע על היום:
-${dailyContext}
-
-אירועים ל-7 הימים הקרובים:
-${upcomingEventsText}`;
-
-            this.chatHistory.addMessage(msg.from, 'user', msg.body);
-
-            const history = this.chatHistory.getHistory(msg.from);
-            // Build conversation context from history (exclude the last user message, it's the current prompt)
-            const conversationMessages = history.slice(0, -1).map(entry => ({
-                role: entry.role as 'user' | 'assistant',
-                content: entry.content,
-            }));
-
-            const reply = await this.aiMessageGenerator.generateMessage(msg.body, systemPrompt, conversationMessages);
-
-            this.chatHistory.addMessage(msg.from, 'assistant', reply);
+            const reply = await this.conversation.generateReply(msg.from, msg.body);
             await this.safeReply(msg, reply);
         } catch (error) {
             Log.log('Error generating AI reply: ' + (error as Error).message);
         }
+    }
+
+    private describeOutgoingMessage(content: whatsapp.MessageContent, options?: whatsapp.MessageSendOptions): string {
+        if (typeof content === 'string') {
+            return content;
+        }
+
+        if (options?.caption) {
+            return `[image] ${options.caption}`;
+        }
+
+        return '[image]';
     }
 }

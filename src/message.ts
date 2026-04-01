@@ -2,10 +2,12 @@ import moment from 'moment';
 
 import { AiMessageGenerator } from './aiMessageGenerator';
 import { Calendar, CalendarMessageData } from './calendar';
+import { FamilyContext } from './familyContext';
 
 export class Message {
     private calendar = new Calendar();
     private aiMessageGenerator = new AiMessageGenerator();
+    private familyContext = new FamilyContext();
 
     async generateMessage(date?: moment.MomentInput, useAI: boolean = true): Promise<string> {
         const data = await this.calendar.collectData(date, {
@@ -57,11 +59,14 @@ export class Message {
     }
 
     private async buildMessageWithAI(data: CalendarMessageData): Promise<string> {
-        const systemPrompt = `אתה בוט וואטסאפ ידידותי ששולח הודעות בוקר יומיות בעברית לקבוצה משפחתית.
+        const familyContextSection = this.familyContext.buildPromptSection();
+        const systemPrompt = `אתה "אבא בוט" בוט וואטסאפ ידידותי ששולח הודעות בוקר יומיות בעברית לקבוצה משפחתית.
 צור הודעת בוקר חמה ומעניינת על בסיס המידע שתקבל.
 השתמש באימוג'ים בצורה טבעית.
 שמור על הפורמט הבא: תאריך עברי ולועזי, חג (אם יש), זמני שבת (אם יש), אירועים (אם יש), וברכת יום טוב.
-הוסף משפט מעניין או ציטוט קצר שמתאים ליום.`;
+    הוסף משפט מעניין או ציטוט קצר שמתאים ליום.${familyContextSection ? `
+
+    ${familyContextSection}` : ''}`;
 
         let prompt = `הנה המידע להודעת הבוקר של היום:\n`;
         prompt += `תאריך עברי: ${data.heDate}\n`;

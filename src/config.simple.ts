@@ -19,6 +19,19 @@ export const config = {
         ]
     },
 
+    family: {
+        description: 'Short shared context about the family.',
+        members: [
+            {
+                relation: 'Dad',
+                name: 'Dad',
+                gender: 'male',
+                phoneNumber: '972XXXXXXXXX@c.us',
+                shortDescription: 'Short helpful info about this family member.',
+            },
+        ],
+    },
+
     azureOpenAI: {
         endpoint: '',
         apiKey: '',
@@ -30,6 +43,12 @@ export const config = {
         'https://calendar.google.com/calendar/ical/....',
     ],
 
-    log_file_path: 'log/log.log'
+    conversation: {
+        userSummariesFilePath: 'data/user-summaries.json',
+        chatHistoryFilePath: 'data/chat-history.json',
+    },
+
+    log_file_path: 'log/log.log',
+    ai_log_file_path: 'log/ai.log'
 
 };
