@@ -12,6 +12,8 @@ const MAX_CALENDAR_LOOKAHEAD_DAYS = 30;
 const FAMILY_GROUP_HISTORY_LIMIT = 20;
 const PRIVATE_HISTORY_LIMIT = 12;
 const USER_SUMMARY_MAX_LENGTH = 1200;
+const USER_SUMMARY_MAX_LINES = 5;
+const USER_SUMMARY_NO_UPDATE_TOKEN = '__NO_UPDATE__';
 
 export class Conversation {
     private calendar = new Calendar();
@@ -26,6 +28,10 @@ export class Conversation {
         const currentUserSection = this.familyContext.buildCurrentUserSection(userId);
         const userSummary = this.userSummaryStore.getSummary(userId);
         const systemPrompt = `אתה "אבא בוט" בוט וואטסאפ ידידותי של משפחה ישראלית. אתה עונה בעברית.
+    זהות מחייבת: אתה "אבא בוט".
+    אין חובה להזדהות בכל תשובה, אבל כשכן מזדהים - ההזדהות היא רק כ"אבא בוט".
+    "אבא בוט" הוא ישות מערכת, לא בן משפחה אנושי.
+    "אבא" הוא קשר משפחתי של אדם (למשל דניאל), ואסור לבלבל ביניהם.
 ענה על הודעות בצורה חמה, ידידותית וקצרה.
 אם השאלה קשורה ללוח זמנים, אירועים, תאריכים, חגים, שבת או תוכניות משפחתיות, קרא קודם לכלי collect_calendar_data ורק אחר כך ענה.
 אם חסר מידע מהלוח כדי לענות נכון, אל תנחש. קרא לכלי.
@@ -126,36 +132,38 @@ ${familyGroupContext}` : ''}`;
     }
 
     private formatCalendarDataForAi(calendarData: CalendarMessageData, daysAhead: number): string {
-        const upcomingDays = calendarData.upcomingDays.map((day) => {
-            const dayDetails: string[] = [
-                `תאריך לועזי: ${day.formattedDate}`,
-                `תאריך עברי: ${day.heDate}`,
-            ];
+        const upcomingDays = calendarData.upcomingDays
+            .filter((day) => day.formattedDate !== calendarData.formattedDate)
+            .map((day) => {
+                const dayDetails: string[] = [
+                    `תאריך לועזי: ${day.formattedDate}`,
+                    `תאריך עברי: ${day.heDate}`,
+                ];
 
-            if (day.holiday) {
-                dayDetails.push(`חג/מועד: ${day.holiday}`);
-            }
-
-            if (day.sabbathTime) {
-                if (day.sabbathTime['Parsha']) {
-                    dayDetails.push(`פרשת השבוע: ${day.sabbathTime['Parsha']}`);
+                if (day.holiday) {
+                    dayDetails.push(`חג/מועד: ${day.holiday}`);
                 }
-                dayDetails.push(`הדלקת נרות: ${day.sabbathTime['CandleLightingTime'].format('HH:mm')}`);
-                dayDetails.push(`צאת שבת: ${day.sabbathTime['HavdalahTime'].format('HH:mm')}`);
-            }
 
-            if (day.events.length === 0) {
-                dayDetails.push('אירועים: אין אירועים.');
+                if (day.sabbathTime) {
+                    if (day.sabbathTime['Parsha']) {
+                        dayDetails.push(`פרשת השבוע: ${day.sabbathTime['Parsha']}`);
+                    }
+                    dayDetails.push(`הדלקת נרות: ${day.sabbathTime['CandleLightingTime'].format('HH:mm')}`);
+                    dayDetails.push(`צאת שבת: ${day.sabbathTime['HavdalahTime'].format('HH:mm')}`);
+                }
+
+                if (day.events.length === 0) {
+                    dayDetails.push('אירועים: אין אירועים.');
+                    return dayDetails.join('\n');
+                }
+
+                const eventsText = day.events.map((event) => {
+                    return '- ' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
+                }).join('\n');
+
+                dayDetails.push(`אירועים:\n${eventsText}`);
                 return dayDetails.join('\n');
-            }
-
-            const eventsText = day.events.map((event) => {
-                return '- ' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
-            }).join('\n');
-
-            dayDetails.push(`אירועים:\n${eventsText}`);
-            return dayDetails.join('\n');
-        }).join('\n\n');
+            }).join('\n\n');
 
         let todayContext = `תאריך עברי: ${calendarData.heDate}\n`;
         todayContext += `תאריך לועזי: ${calendarData.formattedDate}\n`;
@@ -179,7 +187,7 @@ ${familyGroupContext}` : ''}`;
             todayContext.trim(),
             '',
             'ימים קרובים:',
-            upcomingDays,
+            upcomingDays || 'אין ימים נוספים בטווח המבוקש.',
         ].join('\n');
     }
 
@@ -193,11 +201,29 @@ ${familyGroupContext}` : ''}`;
         }
 
         return familyGroupHistory.map((entry) => {
-            const senderName = entry.role === 'assistant'
+            const isBot = entry.role === 'assistant';
+            const senderName = isBot
                 ? 'אבא בוט'
-                : this.familyContext.resolveMemberName(entry.senderId) ?? entry.senderId ?? 'משתמש';
+                : this.familyContext.resolveMemberName(entry.senderId)
+                ?? 'לא מזוהה';
+            const senderRelation = isBot
+                ? null
+                : this.familyContext.resolveMemberRelation(entry.senderId);
+            const entityType = isBot
+                ? 'bot'
+                : senderName === 'לא מזוהה'
+                    ? 'unknown'
+                    : 'family_member';
 
-            return `${senderName}: ${entry.content}`;
+            return JSON.stringify({
+                ts: moment(entry.timestamp).toISOString(),
+                role: entry.role,
+                name: senderName,
+                relation: senderRelation,
+                entityType,
+                senderId: entry.senderId ?? null,
+                text: entry.content,
+            });
         }).join('\n');
     }
 
@@ -210,13 +236,14 @@ ${familyGroupContext}` : ''}`;
     ): Promise<void> {
         try {
             const summaryPrompt = [
-                'עדכן סיכום פנימי קצר על המשתמש עבור בוט משפחתי.',
+                'עדכן סיכום פנימי ארוך-טווח על המשתמש עבור בוט משפחתי.',
                 'הסיכום מיועד רק למערכת ולא יוצג למשתמש.',
-                'שמור רק מידע יציב ושימושי: העדפות, בני משפחה רלוונטיים, נושאים חוזרים, תכניות קבועות והקשר מתמשך.',
+                'שמור הקשר מתמשך בלבד: העדפות יציבות, בני משפחה רלוונטיים, נושאים חוזרים, תכניות קבועות ודפוסים חשובים לאורך זמן.',
                 'אל תנחש. אל תכתוב תכונות אופי ספקולטיביות. אל תוסיף פרטים שלא נתמכים בשיחה.',
                 'אם יש זיהוי מפורש של המשתמש מתוך נתוני המשפחה, השתמש בו ואל תכתוב שאין מידע על השם שלו.',
-                'אם אין מידע יציב, החזר מחרוזת ריקה.',
-                'החזר טקסט קצר בלבד, עד 6 שורות.',
+                `אם אין עדכון מהותי לסיכום הקיים, החזר בדיוק: ${USER_SUMMARY_NO_UPDATE_TOKEN}`,
+                `אורך הסיכום: עד ${USER_SUMMARY_MAX_LINES} שורות.`,
+                'אין לכתוב משפטי מצב כמו "אין מידע נוסף" או "אין שינוי" בתוך הסיכום.',
                 '',
                 'זיהוי המשתמש הנוכחי:',
                 currentUserSection || '(לא ידוע)',
@@ -233,10 +260,30 @@ ${familyGroupContext}` : ''}`;
 
             const updatedSummary = await this.aiMessageGenerator.generateMessage(
                 summaryPrompt,
-                'אתה מעדכן זיכרון פנימי תמציתי על משתמש. החזר רק את הסיכום החדש ללא הקדמה.',
+                'אתה מעדכן זיכרון פנימי ארוך-טווח על משתמש. החזר רק את הסיכום החדש, או את טוקן אי-העדכון המדויק.',
             );
 
-            this.userSummaryStore.setSummary(userId, updatedSummary.slice(0, USER_SUMMARY_MAX_LENGTH));
+            const normalizedSummary = updatedSummary.trim();
+            if (!normalizedSummary || normalizedSummary === USER_SUMMARY_NO_UPDATE_TOKEN) {
+                return;
+            }
+
+            if (/אין\s+מידע\s+נוסף|אין\s+שינויים?|ללא\s+שינוי/i.test(normalizedSummary)) {
+                return;
+            }
+
+            const summaryLines = normalizedSummary
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0)
+                .slice(0, USER_SUMMARY_MAX_LINES);
+
+            if (summaryLines.length === 0) {
+                return;
+            }
+
+            const finalSummary = summaryLines.join('\n');
+            this.userSummaryStore.setSummary(userId, finalSummary.slice(0, USER_SUMMARY_MAX_LENGTH));
         } catch (error) {
             Log.log('Error updating user summary: ' + (error as Error).message);
         }

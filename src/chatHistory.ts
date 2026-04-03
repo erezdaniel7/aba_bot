@@ -27,7 +27,12 @@ export class ChatHistory {
         if (!this.history.has(userId)) {
             this.history.set(userId, []);
         }
-        this.history.get(userId)!.push({ role, content, timestamp: Date.now(), senderId: options?.senderId });
+        this.history.get(userId)!.push({
+            role,
+            content,
+            timestamp: Date.now(),
+            senderId: options?.senderId,
+        });
         this.cleanup(userId);
         this.save();
     }
@@ -82,12 +87,19 @@ export class ChatHistory {
                     continue;
                 }
 
-                const normalizedEntries = entries.filter((entry) => {
-                    return entry
-                        && (entry.role === 'user' || entry.role === 'assistant')
-                        && typeof entry.content === 'string'
-                        && typeof entry.timestamp === 'number';
-                });
+                const normalizedEntries = entries
+                    .filter((entry) => {
+                        return entry
+                            && (entry.role === 'user' || entry.role === 'assistant')
+                            && typeof entry.content === 'string'
+                            && typeof entry.timestamp === 'number';
+                    })
+                    .map((entry) => ({
+                        role: entry.role,
+                        content: entry.content,
+                        timestamp: entry.timestamp,
+                        senderId: typeof entry.senderId === 'string' ? entry.senderId : undefined,
+                    }));
 
                 if (normalizedEntries.length > 0) {
                     this.history.set(userId, normalizedEntries);

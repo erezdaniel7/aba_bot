@@ -3,9 +3,19 @@ import { config } from './config';
 export class FamilyContext {
     public buildPromptSection(): string {
         const intro = config.family.description.trim();
+        const identityRules = [
+            'זהויות חשובות:',
+            '- "אבא בוט" הוא הבוט בלבד ואינו אדם במשפחה.',
+            '- "אבא" הוא קשר משפחתי של אדם (למשל דניאל), ולא שם הבוט.',
+            '- לעולם אין לאחד בין זהות הבוט לבין זהות בן משפחה.',
+        ].join('\n');
         const memberLines = config.family.members
             .map((member) => {
-                const details: string[] = [`שם: ${this.getDisplayName(member)}`];
+                const details: string[] = [];
+
+                if (member.name.trim()) {
+                    details.push(`שם פרטי: ${member.name.trim()}`);
+                }
 
                 if (member.relation.trim()) {
                     details.push(`קשר משפחתי: ${member.relation.trim()}`);
@@ -32,6 +42,7 @@ export class FamilyContext {
         }
 
         const sections = ['מידע על המשפחה:'];
+        sections.push(identityRules);
         if (intro) {
             sections.push(intro);
         }
@@ -70,7 +81,12 @@ export class FamilyContext {
 
     public resolveMemberName(phoneNumber?: string): string | null {
         const match = this.findMemberByPhone(phoneNumber);
-        return match ? this.getDisplayName(match) : null;
+        return match ? match.name.trim() : null;
+    }
+
+    public resolveMemberRelation(phoneNumber?: string): string | null {
+        const match = this.findMemberByPhone(phoneNumber);
+        return match ? match.relation.trim() : null;
     }
 
     private findMemberByPhone(phoneNumber?: string) {
@@ -79,8 +95,22 @@ export class FamilyContext {
         }
 
         const normalizedPhone = this.normalizePhoneNumber(phoneNumber);
+        const normalizedDigits = this.extractDigits(normalizedPhone);
+
         return config.family.members.find((member) => {
-            return this.normalizePhoneNumber(member.phoneNumber) === normalizedPhone;
+            const memberNormalized = this.normalizePhoneNumber(member.phoneNumber);
+            if (memberNormalized === normalizedPhone) {
+                return true;
+            }
+
+            const memberDigits = this.extractDigits(memberNormalized);
+            if (!normalizedDigits || !memberDigits) {
+                return false;
+            }
+
+            return memberDigits === normalizedDigits
+                || memberDigits.endsWith(normalizedDigits)
+                || normalizedDigits.endsWith(memberDigits);
         });
     }
 
@@ -97,5 +127,9 @@ export class FamilyContext {
 
     private normalizePhoneNumber(phoneNumber?: string): string {
         return (phoneNumber ?? '').trim().toLowerCase();
+    }
+
+    private extractDigits(value: string): string {
+        return value.replace(/\D/g, '');
     }
 }

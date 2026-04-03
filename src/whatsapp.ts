@@ -29,6 +29,64 @@ function getChromePath(): string {
 const RESTART_DELAY_MS = 15_000;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 const HEALTH_CHECK_TIMEOUT_MS = 10_000;
+const LOCKFILE_RETRY_COUNT = 6;
+const LOCKFILE_RETRY_DELAY_MS = 1_000;
+const LOCAL_AUTH_CLIENT_ID = 'aba_bot_main';
+const LOCAL_AUTH_DATA_PATH = path.join(__dirname, '..', 'wwebjs_auth');
+
+function getSessionDirectoryPath(): string {
+    return path.join(LOCAL_AUTH_DATA_PATH, `session-${LOCAL_AUTH_CLIENT_ID}`);
+}
+
+function sleepSync(ms: number): void {
+    const atomics = new Int32Array(new SharedArrayBuffer(4));
+    Atomics.wait(atomics, 0, 0, ms);
+}
+
+function escapeForSingleQuotedPowerShell(value: string): string {
+    return value.replace(/'/g, "''");
+}
+
+function killChromeProcessesForSession(sessionDir: string): void {
+    const escapedSessionDir = escapeForSingleQuotedPowerShell(sessionDir);
+    const psCommand = [
+        "$ErrorActionPreference='SilentlyContinue'",
+        `$session='${escapedSessionDir}'`,
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\"",
+        "| Where-Object { $_.CommandLine -like \"*${session}*\" }",
+        "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+    ].join('; ');
+
+    execSync(`powershell -NoProfile -Command \"${psCommand}\"`, { timeout: 10_000, stdio: 'ignore' });
+}
+
+function removeSessionLockFileWithRetries(lockFile: string, sessionDir: string): boolean {
+    for (let attempt = 1; attempt <= LOCKFILE_RETRY_COUNT; attempt++) {
+        if (!fs.existsSync(lockFile)) {
+            return true;
+        }
+
+        try {
+            fs.unlinkSync(lockFile);
+            return true;
+        } catch (error) {
+            const errorCode = (error as NodeJS.ErrnoException).code;
+            if (errorCode !== 'EBUSY' && errorCode !== 'EPERM') {
+                throw error;
+            }
+
+            try {
+                killChromeProcessesForSession(sessionDir);
+            } catch {
+                // Keep retrying lockfile deletion even if process lookup fails.
+            }
+
+            sleepSync(LOCKFILE_RETRY_DELAY_MS);
+        }
+    }
+
+    return !fs.existsSync(lockFile);
+}
 
 export class WhatsApp {
     private client!: whatsapp.Client;
@@ -61,8 +119,13 @@ export class WhatsApp {
         this.stopHealthCheck();
 
         try {
-            await this.client.destroy();
-            Log.log('Old client destroyed');
+            const clientRef = (this as unknown as { client?: whatsapp.Client }).client;
+            if (clientRef && typeof clientRef.destroy === 'function') {
+                await clientRef.destroy();
+                Log.log('Old client destroyed');
+            } else {
+                Log.log('No active client to destroy before restart');
+            }
         } catch (e) {
             Log.log('Error destroying old client: ' + (e as Error).message);
         }
@@ -128,28 +191,25 @@ export class WhatsApp {
         const chromePath = getChromePath();
 
         // Clean up stale browser lock to prevent "browser is already running" errors on restart
-        const sessionDir = path.join(__dirname, '..', 'wwebjs_auth', 'session');
+        const sessionDir = getSessionDirectoryPath();
         const lockFile = path.join(sessionDir, 'lockfile');
         if (fs.existsSync(lockFile)) {
             try {
-                fs.unlinkSync(lockFile);
-                Log.log('Removed stale browser lockfile');
-            } catch (e) {
-                // Lockfile is held by a running Chrome — kill Chrome processes using this session
-                Log.log('Lockfile is busy, killing old Chrome processes...');
+                // A present lockfile is often stale; kill any matching Chrome process first.
                 try {
-                    const sessionDirNorm = sessionDir.replace(/\//g, '\\');
-                    execSync(`wmic process where "commandline like '%${sessionDirNorm.replace(/\\/g, '\\\\')}%' and name='chrome.exe'" call terminate`, { timeout: 10000 });
-                    Log.log('Terminated old Chrome processes');
-                } catch { /* no matching processes, or wmic unavailable */ }
-                try {
-                    fs.unlinkSync(lockFile);
-                    Log.log('Removed lockfile after killing Chrome');
-                } catch (e2) {
-                    if ((e2 as NodeJS.ErrnoException).code !== 'ENOENT') {
-                        Log.log('Still could not remove lockfile: ' + (e2 as Error).message);
-                    }
+                    killChromeProcessesForSession(sessionDir);
+                } catch {
+                    // Continue with lockfile cleanup attempts.
                 }
+
+                const removed = removeSessionLockFileWithRetries(lockFile, sessionDir);
+                if (removed) {
+                    Log.log('Removed stale browser lockfile');
+                } else {
+                    Log.log('Could not clear lockfile after retries; continuing with initialization.');
+                }
+            } catch (e) {
+                Log.log('Failed while clearing lockfile, continuing: ' + (e as Error).message);
             }
         }
 
@@ -159,7 +219,8 @@ export class WhatsApp {
             },
 
             authStrategy: new whatsapp.LocalAuth({
-                dataPath: path.join(__dirname, '..', 'wwebjs_auth')
+                dataPath: LOCAL_AUTH_DATA_PATH,
+                clientId: LOCAL_AUTH_CLIENT_ID,
             }),
 
             puppeteer: {
@@ -188,9 +249,13 @@ export class WhatsApp {
         });
 
         this.client.on('qr', (qr: string) => {
-            // Generate and scan this code with your phone
-            Log.log('QR RECEIVED' + qr);
-            qrcode.generate(qr, { small: true });
+            Log.log('QR RECEIVED');
+
+            if (process.stdout?.isTTY) {
+                qrcode.generate(qr, { small: true });
+            } else {
+                Log.log('Skipping QR terminal rendering because no interactive console is available.');
+            }
         });
 
         this.client.on('ready', async () => {
@@ -262,6 +327,143 @@ export class WhatsApp {
         }
     }
 
+    private async markMessageAsRead(msg: whatsapp.Message): Promise<whatsapp.Chat | null> {
+        const maxAttempts = 3;
+        let chat: whatsapp.Chat | null = null;
+
+        const wait = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+        const isChatRead = async (chatId: string): Promise<boolean> => {
+            try {
+                const chatById = await this.client.getChatById(chatId);
+                const unreadCount = (chatById as unknown as { unreadCount?: number }).unreadCount ?? 0;
+                return unreadCount === 0;
+            } catch {
+                return false;
+            }
+        };
+
+        const directSendSeenAndVerify = async (chatId: string): Promise<boolean> => {
+            const page = this.client.pupPage;
+            if (!page) {
+                return false;
+            }
+
+            return page.evaluate(async (targetChatId: string) => {
+                const browserGlobal = globalThis as typeof globalThis & {
+                    WWebJS: {
+                        getChat: (chatId: string, options?: { getAsModel?: boolean }) => Promise<{ unreadCount?: number } | null>;
+                        sendSeen: (chatId: string) => Promise<boolean>;
+                    };
+                };
+
+                const chat = await browserGlobal.WWebJS.getChat(targetChatId, { getAsModel: false });
+                if (!chat) {
+                    return false;
+                }
+
+                await browserGlobal.WWebJS.sendSeen(targetChatId);
+
+                const verifiedChat = await browserGlobal.WWebJS.getChat(targetChatId, { getAsModel: false });
+                return Boolean(verifiedChat) && Number(verifiedChat?.unreadCount || 0) === 0;
+            }, chatId);
+        };
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            // 1) Preferred path from docs: Client.sendSeen(chatId)
+            try {
+                const sendSeenResult = await this.client.sendSeen(msg.from);
+                if (sendSeenResult && await isChatRead(msg.from)) {
+                    chat = chat ?? await msg.getChat().catch(() => null);
+                    return chat;
+                }
+                Log.log(`Client.sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
+            } catch (error) {
+                Log.log(`Client.sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
+            }
+
+            // 2) Message chat instance path: msg.getChat().sendSeen()
+            try {
+                chat = chat ?? await msg.getChat();
+                const chatSeenResult = await chat.sendSeen();
+                if (chatSeenResult && await isChatRead(msg.from)) {
+                    return chat;
+                }
+                Log.log(`Chat.sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
+            } catch (error) {
+                Log.log(`Chat.sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
+            }
+
+            // 3) Fresh chat instance path: client.getChatById(chatId).sendSeen()
+            try {
+                const chatById = await this.client.getChatById(msg.from);
+                const chatLike = chatById as unknown as { sendSeen?: () => Promise<boolean> };
+                if (typeof chatLike.sendSeen === 'function') {
+                    const byIdResult = await chatLike.sendSeen();
+                    if (byIdResult && await isChatRead(msg.from)) {
+                        chat = chatById as unknown as whatsapp.Chat;
+                        return chat;
+                    }
+                    Log.log(`getChatById().sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
+                }
+            } catch (error) {
+                Log.log(`getChatById().sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
+            }
+
+            // 4) Direct page-level fallback using the same primitives as the library.
+            try {
+                const directResult = await directSendSeenAndVerify(msg.from);
+                if (directResult) {
+                    chat = chat ?? await msg.getChat().catch(() => null);
+                    return chat;
+                }
+                Log.log(`Direct WWebJS.sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
+            } catch (error) {
+                Log.log(`Direct WWebJS.sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
+            }
+
+            // 5) Last resort from docs/issues: sync history then retry direct sendSeen.
+            try {
+                await this.client.syncHistory(msg.from);
+                const syncRetryResult = await directSendSeenAndVerify(msg.from);
+                if (syncRetryResult) {
+                    chat = chat ?? await msg.getChat().catch(() => null);
+                    return chat;
+                }
+                Log.log(`syncHistory + direct sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
+            } catch (error) {
+                Log.log(`syncHistory + direct sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
+            }
+
+            if (attempt < maxAttempts) {
+                await wait(400);
+            }
+        }
+
+        Log.log('Unable to mark message as read after retries for ' + msg.from);
+        return chat;
+    }
+
+    private startTypingIndicator(chat: whatsapp.Chat): () => Promise<void> {
+        void chat.sendStateTyping().catch((error) => {
+            Log.log('Error setting typing state: ' + (error as Error).message);
+        });
+
+        const timer = setInterval(() => {
+            void chat.sendStateTyping().catch((error) => {
+                Log.log('Error refreshing typing state: ' + (error as Error).message);
+            });
+        }, 8_000);
+
+        return async () => {
+            clearInterval(timer);
+            try {
+                await chat.clearState();
+            } catch (error) {
+                Log.log('Error clearing typing state: ' + (error as Error).message);
+            }
+        };
+    }
+
     private async onMessageReceived(msg: whatsapp.Message) {
         // Ignore newsletter/channel messages
         if (msg.from.endsWith('@newsletter')) {
@@ -269,7 +471,24 @@ export class WhatsApp {
         }
 
         if (msg.from === config.whatsApp.groupChatId && msg.author) {
-            this.conversation.recordFamilyGroupUserMessage(msg.author, msg.body);
+            await this.markMessageAsRead(msg);
+
+            let senderId = msg.author;
+
+            try {
+                const contact = await msg.getContact();
+                const contactInfo = contact as unknown as {
+                    number?: string;
+                };
+
+                if (contactInfo.number?.trim()) {
+                    senderId = `${contactInfo.number.trim()}@c.us`;
+                }
+            } catch (error) {
+                Log.log('Error resolving group sender contact: ' + (error as Error).message);
+            }
+
+            this.conversation.recordFamilyGroupUserMessage(senderId, msg.body);
         }
 
         // Ignore group messages — only reply to private chats
@@ -277,13 +496,7 @@ export class WhatsApp {
             return;
         }
 
-        // Mark the message as read
-        try {
-            const chat = await msg.getChat();
-            await chat.sendSeen();
-        } catch (error) {
-            Log.log('Error marking message as read: ' + (error as Error).message);
-        }
+        const chat = await this.markMessageAsRead(msg);
 
         Log.log('MESSAGE RECEIVED:');
         Log.log('msg.from:' + msg.from);
@@ -293,11 +506,17 @@ export class WhatsApp {
             return;
         }
 
+        const stopTyping = chat ? this.startTypingIndicator(chat) : null;
+
         try {
             const reply = await this.conversation.generateReply(msg.from, msg.body);
             await this.safeReply(msg, reply);
         } catch (error) {
             Log.log('Error generating AI reply: ' + (error as Error).message);
+        } finally {
+            if (stopTyping) {
+                await stopTyping();
+            }
         }
     }
 

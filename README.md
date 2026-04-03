@@ -175,6 +175,8 @@ npm start
 
 On the first run, a **QR code** will be displayed in the terminal. Scan it with WhatsApp (Linked Devices) to authenticate. The session is saved in the `wwebjs_auth/` folder so you won't need to scan again on subsequent runs.
 
+> **Note:** If the bot runs as a **Windows service**, there is no interactive terminal, so the QR is intentionally **not rendered there**. Link the WhatsApp session once from a normal terminal first, then run the bot as a service.
+
 ### Development
 
 ```bash
