@@ -18,6 +18,14 @@ export interface AiToolDefinition {
     execute: (argumentsJson: string) => Promise<string>;
 }
 
+export interface AiGenerationOptions {
+    temperature?: number;
+    topP?: number;
+    frequencyPenalty?: number;
+    presencePenalty?: number;
+    maxTokens?: number;
+}
+
 export class AiMessageGenerator {
 
     private client: AzureOpenAI;
@@ -35,7 +43,8 @@ export class AiMessageGenerator {
         prompt: string,
         systemPrompt: string,
         conversationHistory: AiConversationMessage[] = [],
-        tools: AiToolDefinition[] = []
+        tools: AiToolDefinition[] = [],
+        options: AiGenerationOptions = {}
     ): Promise<string> {
         const requestId = this.createRequestId();
         const messages: ChatCompletionMessageParam[] = [
@@ -52,6 +61,11 @@ export class AiMessageGenerator {
                 const response = await this.client.chat.completions.create({
                     model: config.azureOpenAI.deploymentName,
                     messages,
+                    ...(typeof options.temperature === 'number' ? { temperature: options.temperature } : {}),
+                    ...(typeof options.topP === 'number' ? { top_p: options.topP } : {}),
+                    ...(typeof options.frequencyPenalty === 'number' ? { frequency_penalty: options.frequencyPenalty } : {}),
+                    ...(typeof options.presencePenalty === 'number' ? { presence_penalty: options.presencePenalty } : {}),
+                    ...(typeof options.maxTokens === 'number' ? { max_tokens: options.maxTokens } : {}),
                     ...(tools.length > 0
                         ? {
                             tools: tools.map((toolDefinition) => toolDefinition.tool),

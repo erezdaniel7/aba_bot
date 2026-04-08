@@ -18,9 +18,12 @@ A WhatsApp bot that automatically sends daily calendar schedules and Jewish date
 - **Shabbat Times** — Displays candle lighting and Havdalah times, plus the weekly Parsha.
 - **Recurring Event Support** — Properly handles recurring calendar events (RRULE), including rescheduled and deleted occurrences.
 - **Private AI Replies** — Responds only to authorized private chats using Azure OpenAI, with context from today's Jewish date data, Shabbat info, holidays, upcoming calendar events, and the identified family member behind the current chat.
-- **Conversation Memory** — Keeps per-user conversation history and a rolling user summary so private AI replies can use recent chat context together with calendar data, and persists both to JSON files across restarts.
+- **Structured Conversation Memory** — Keeps per-user conversation history plus a structured long-term summary with stable facts and recent notes, so the bot remembers older relevant context instead of only the latest session.
+- **Mentioned Family Memory** — When a message talks about another family member, the bot can keep a lightweight summary for that mentioned person as well.
 - **Family Context** — Uses configurable family-level context, member names, relation, gender, phone-to-name mapping, and short notes about each family member in both daily messages and private AI replies.
-- **AI Debug Logging** — Writes AI prompts, tool calls, tool results, and final responses to a dedicated log file for troubleshooting.
+- **AI Debug Logging** — Writes AI prompts, tool calls, tool results, and final responses to a dedicated log file for troubleshooting, with clear separators between entries.
+- **AI Variety Controls** — Daily AI messages use anti-repetition prompt rules, recent-message memory, and tuned generation settings to keep the tone warmer and less repetitive across days.
+- **AI Metrics** — Tracks lightweight repetition and summary-update metrics in JSON files to help monitor quality over time.
 - **HTTP API** — An Express HTTP server exposes a `POST /send-message` endpoint to send text or image messages programmatically.
 - **WhatsApp QR Authentication** — On first run, a QR code is displayed in the terminal for linking with WhatsApp Web. Session is persisted locally for subsequent runs.
 - **Windows Service Support** — Can be installed as a Windows service via `node-windows`.
@@ -47,13 +50,14 @@ npm install
 
 ## Configuration
 
-Copy `src/config.simple.ts` to `src/config.ts` and fill in the values:
+Copy `src/config.simple.ts` to `src/config.ts`, then create a local `.env` file from the example:
 
 ```bash
 cp src/config.simple.ts src/config.ts
+cp .env.example .env
 ```
 
-Edit `src/config.ts`:
+Edit `src/config.ts` for your WhatsApp/family/calendar settings, and edit `.env` for Azure OpenAI secrets:
 
 ```ts
 export const config = {
@@ -88,10 +92,10 @@ export const config = {
     },
 
     azureOpenAI: {
-        endpoint: 'https://....api.cognitive.microsoft.com/',  // Azure OpenAI endpoint
-        apiKey: 'your-api-key',                                // Azure OpenAI API key
-        deploymentName: 'your-deployment',                     // Model deployment name
-        apiVersion: '2024-12-01-preview',                      // API version
+        endpoint: process.env.AZURE_OPENAI_ENDPOINT ?? '',
+        apiKey: process.env.AZURE_OPENAI_API_KEY ?? '',
+        deploymentName: process.env.AZURE_OPENAI_DEPLOYMENT ?? '',
+        apiVersion: process.env.AZURE_OPENAI_API_VERSION ?? '2024-12-01-preview',
     },
 
     ics_list: [
@@ -100,8 +104,10 @@ export const config = {
     ],
 
     conversation: {
-        userSummariesFilePath: 'data/user-summaries.json', // Persistent per-user summaries
-        chatHistoryFilePath: 'data/chat-history.json',     // Persistent chat history
+        userSummariesFilePath: 'data/user-summaries.json',   // Persistent per-user summaries
+        entitySummariesFilePath: 'data/entity-summaries.json', // Mentioned family-member summaries
+        aiMetricsFilePath: 'data/ai-metrics.json',           // Lightweight AI quality metrics
+        chatHistoryFilePath: 'data/chat-history.json',       // Persistent chat history
     },
 
     log_file_path: 'log/log.log',       // Path to the general log file
@@ -124,13 +130,28 @@ export const config = {
 | `family.members[].phoneNumber` | Used to map the active private chat to a known family member, so the AI knows who is currently speaking |
 | `ics_list` | Array of ICS calendar URLs to fetch events from |
 | `conversation.userSummariesFilePath` | JSON file path for persisted per-user summaries |
+| `conversation.entitySummariesFilePath` | JSON file path for mentioned family-member summaries |
+| `conversation.aiMetricsFilePath` | JSON file path for lightweight AI quality metrics |
 | `conversation.chatHistoryFilePath` | JSON file path for persisted chat history |
-| `azureOpenAI.endpoint` | Azure OpenAI resource endpoint URL |
-| `azureOpenAI.apiKey` | Azure OpenAI API key |
+| `azureOpenAI.endpoint` | Azure OpenAI resource endpoint URL (usually from `.env`) |
+| `azureOpenAI.apiKey` | Azure OpenAI API key (from `.env`) |
 | `azureOpenAI.deploymentName` | Name of the deployed model (e.g. `aba-bot`) |
 | `azureOpenAI.apiVersion` | Azure OpenAI API version |
 | `log_file_path` | File path for the log output |
 | `ai_log_file_path` | File path for AI debug logs including prompts and tool calls |
+
+### Environment Variables
+
+Create a local `.env` file based on `.env.example`:
+
+```env
+AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
+AZURE_OPENAI_API_KEY=replace-with-your-azure-openai-key
+AZURE_OPENAI_DEPLOYMENT=aba-bot
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+```
+
+> `.env` is ignored by git. Commit only `.env.example`.
 
 ### Family Context Notes
 
@@ -160,7 +181,7 @@ az cognitiveservices account keys list --name aba-bot-openai --resource-group ab
 az cognitiveservices account show --name aba-bot-openai --resource-group aba-bot-rg --query "properties.endpoint" -o tsv
 ```
 
-Copy the endpoint and key into `config.ts` under `azureOpenAI`.
+Copy the endpoint and key into your local `.env` file so `src/config.ts` can load them automatically with `dotenv`.
 
 > **Tip:** To find chat IDs, you can check the bot logs after receiving a message — the sender's chat ID is logged.
 
@@ -238,7 +259,12 @@ src/
 ├── calendar.ts         # ICS calendar fetching, caching, and message data collection
 ├── message.ts          # Daily message generation (with/without AI)
 ├── aiMessageGenerator.ts # Azure OpenAI client wrapper
+├── aiBehavior.ts       # AI repetition control and summary-update heuristics
+├── aiMetrics.ts        # Lightweight AI quality metrics persistence
 ├── chatHistory.ts      # Per-user private chat context memory
+├── userSummaryStore.ts # Structured long-term user summaries
+├── entitySummaryStore.ts # Memory for mentioned family members
+├── familyContext.ts    # Family context + mentioned-member detection
 ├── whatsapp.ts         # WhatsApp Web client wrapper
 ├── httpServer.ts       # Express HTTP API
 ├── log.ts              # File & console logging

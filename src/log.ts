@@ -92,7 +92,8 @@ export class Log {
     }
 
     static logAi(message: string) {
-        this.writeToFile(config.ai_log_file_path, message);
+        const separator = '------------------------------------------------------------------------';
+        this.writeToFile(config.ai_log_file_path, `\n${separator}\n${message}\n${separator}`);
     }
 
     private static ensureConsoleErrorHandler() {

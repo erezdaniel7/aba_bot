@@ -1,3 +1,7 @@
+import dotenv from 'dotenv';
+
+dotenv.config({ quiet: true });
+
 export const config = {
 
     httpServer: {
@@ -21,6 +25,19 @@ export const config = {
 
     family: {
         description: 'Short shared context about the family.',
+        identityRules: [
+            '"Dad Bot" is the bot only and is not a human family member.',
+            '"Dad" is a family relation of a person, not the bot name.',
+            'Never merge the bot identity with a family member identity.',
+        ],
+        signalKeywords: [
+            'family topic',
+            'shared hobby',
+        ],
+        lowSignalGroupPhrases: [
+            'system alert',
+            'status ended',
+        ],
         members: [
             {
                 relation: 'Dad',
@@ -33,10 +50,10 @@ export const config = {
     },
 
     azureOpenAI: {
-        endpoint: '',
-        apiKey: '',
-        deploymentName: '',
-        apiVersion: '2024-12-01-preview',
+        endpoint: process.env.AZURE_OPENAI_ENDPOINT ?? '',
+        apiKey: process.env.AZURE_OPENAI_API_KEY ?? '',
+        deploymentName: process.env.AZURE_OPENAI_DEPLOYMENT ?? '',
+        apiVersion: process.env.AZURE_OPENAI_API_VERSION ?? '2024-12-01-preview',
     },
 
     ics_list: [
@@ -45,6 +62,8 @@ export const config = {
 
     conversation: {
         userSummariesFilePath: 'data/user-summaries.json',
+        entitySummariesFilePath: 'data/entity-summaries.json',
+        aiMetricsFilePath: 'data/ai-metrics.json',
         chatHistoryFilePath: 'data/chat-history.json',
     },
 
