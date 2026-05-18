@@ -1,17 +1,16 @@
 import express, { Express, Request, Response } from 'express';
-import * as whatsapp from 'whatsapp-web.js';
 import bodyParser from 'body-parser';
 
 
 import { config } from './config';
 import { Log } from './log';
-import { WhatsApp } from './whatsapp';
+import { OutgoingMessagePayload, WhatsAppClient } from './whatsapp.types';
 
 export class HttpServer {
     private app: Express;
-    private whatsapp: WhatsApp;
+    private whatsapp: WhatsAppClient;
 
-    constructor(whatsapp: WhatsApp) {
+    constructor(whatsapp: WhatsAppClient) {
         this.whatsapp = whatsapp;
         this.app = express();
         this.app.use(bodyParser.json({ limit: '10mb' }));
@@ -28,20 +27,18 @@ export class HttpServer {
                 return;
             }
             try {
-                let result;
+                let payload: OutgoingMessagePayload;
                 if (imageBase64) {
-                    // Send image (base64 string)
-                    const { MessageMedia } = require('whatsapp-web.js');
-                    const mimeType = 'image/png'; // You may want to allow client to specify mime type
-                    const mediaObj = new MessageMedia(mimeType, imageBase64);
-                    const options: whatsapp.MessageSendOptions = {};
-                    if (content) {
-                        options.caption = content;
-                    }
-                    result = await this.whatsapp.sendMessage(chatId, mediaObj, options);
+                    payload = {
+                        base64: imageBase64,
+                        mimeType: 'image/png',
+                        ...(content ? { caption: content } : {}),
+                    };
                 } else {
-                    result = await this.whatsapp.sendMessage(chatId, content || '');
+                    payload = content || '';
                 }
+
+                await this.whatsapp.sendMessage(chatId, payload);
                 Log.log(`Custom message sent to ${chatId}: ${content ? content.split('\n')[0] : '[image]'}`);
                 res.json({ status: 'Message sent' });
             } catch (err) {

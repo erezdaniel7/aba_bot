@@ -152,7 +152,6 @@ ${familyGroupContext}` : ''}`;
 
     private formatCalendarDataForAi(calendarData: CalendarMessageData, daysAhead: number): string {
         const upcomingDays = calendarData.upcomingDays
-            .filter((day) => day.formattedDate !== calendarData.formattedDate)
             .map((day) => {
                 const dayDetails: string[] = [
                     `תאריך לועזי: ${day.formattedDate}`,
@@ -182,31 +181,16 @@ ${familyGroupContext}` : ''}`;
 
                 dayDetails.push(`אירועים:\n${eventsText}`);
                 return dayDetails.join('\n');
-            }).join('\n\n');
-
-        let todayContext = `תאריך עברי: ${calendarData.heDate}\n`;
-        todayContext += `תאריך לועזי: ${calendarData.formattedDate}\n`;
-
-        if (calendarData.holiday) {
-            todayContext += `חג/מועד: ${calendarData.holiday}\n`;
-        }
-
-        if (calendarData.sabbathTime) {
-            if (calendarData.sabbathTime['Parsha']) {
-                todayContext += `פרשת השבוע: ${calendarData.sabbathTime['Parsha']}\n`;
-            }
-            todayContext += `הדלקת נרות: ${calendarData.sabbathTime['CandleLightingTime'].format('HH:mm')}\n`;
-            todayContext += `צאת שבת: ${calendarData.sabbathTime['HavdalahTime'].format('HH:mm')}\n`;
-        }
+            });
 
         return [
             `נתוני לוח שנה ל-${daysAhead} ימים:`,
             '',
             'מידע על היום:',
-            todayContext.trim(),
+            upcomingDays[0].trim(),
             '',
             'ימים קרובים:',
-            upcomingDays || 'אין ימים נוספים בטווח המבוקש.',
+            upcomingDays.slice(1).join('\n\n') || 'אין ימים נוספים בטווח המבוקש.',
         ].join('\n');
     }
 

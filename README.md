@@ -33,7 +33,6 @@ A WhatsApp bot that automatically sends daily calendar schedules and Jewish date
 ## Prerequisites
 
 - **Node.js** (v18 or later recommended)
-- **Google Chrome** installed (used by Puppeteer for WhatsApp Web)
 - **WhatsApp account** to link with the bot
 - **Azure OpenAI resource** (optional, for AI-generated messages) — [Create one via Azure CLI](#azure-openai-setup)
 
@@ -194,9 +193,17 @@ Copy the endpoint and key into your local `.env` file so `src/config.ts` can loa
 npm start
 ```
 
-On the first run, a **QR code** will be displayed in the terminal. Scan it with WhatsApp (Linked Devices) to authenticate. The session is saved in the `wwebjs_auth/` folder so you won't need to scan again on subsequent runs.
+On the first run, a **QR code** will be displayed in the terminal. Scan it with WhatsApp (Linked Devices) to authenticate. The session is saved in the `bailey_auth/` folder so you won't need to scan again on subsequent runs.
 
 > **Note:** If the bot runs as a **Windows service**, there is no interactive terminal, so the QR is intentionally **not rendered there**. Link the WhatsApp session once from a normal terminal first, then run the bot as a service.
+
+### Migration Notes (whatsapp-web.js -> Baileys)
+
+- **Auth folder changed:** Session credentials are now stored in `bailey_auth/` (not `wwebjs_auth/`).
+- **First run after migration:** You will need to scan a new QR code once to create Baileys auth state.
+- **Config chat IDs stay the same:** Keep using `@c.us` (users) and `@g.us` (groups) in `src/config.ts`.
+- **Internal JID mapping:** The app maps `@c.us` to Baileys `@s.whatsapp.net` internally on send/receive boundaries.
+- **HTTP API input stays the same:** Existing `chatId` values in `POST /send-message` do not need changes.
 
 ### Development
 
@@ -265,7 +272,7 @@ src/
 ├── userSummaryStore.ts # Structured long-term user summaries
 ├── entitySummaryStore.ts # Memory for mentioned family members
 ├── familyContext.ts    # Family context + mentioned-member detection
-├── whatsapp.ts         # WhatsApp Web client wrapper
+├── whatsapp.ts         # WhatsApp client wrapper (Baileys)
 ├── httpServer.ts       # Express HTTP API
 ├── log.ts              # File & console logging
 └── heDate/
@@ -277,7 +284,7 @@ src/
 ## Tech Stack
 
 - **TypeScript** / **Node.js**
-- **whatsapp-web.js** — WhatsApp Web client via Puppeteer
+- **@whiskeysockets/baileys** — WhatsApp Web API client (multi-device)
 - **node-ical** — ICS calendar parsing
 - **@hebcal/core** — Hebrew calendar, Shabbat times, Parsha
 - **node-schedule** — Cron-like job scheduling

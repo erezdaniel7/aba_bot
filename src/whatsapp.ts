@@ -1,534 +1,456 @@
-import * as whatsapp from 'whatsapp-web.js';
+import type {
+    WAMessage,
+    WAMessageContent,
+    WASocket,
+    makeWASocket as MakeWASocket,
+    useMultiFileAuthState as UseMultiFileAuthState,
+    fetchLatestBaileysVersion as FetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore as MakeCacheableSignalKeyStore,
+    getContentType as GetContentType,
+} from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
-import { execSync } from 'child_process';
 
 import { config } from './config';
 import { Conversation } from './conversation';
 import { Log } from './log';
+import { OutgoingImagePayload, OutgoingMessagePayload, WhatsAppClient } from './whatsapp.types';
 
-// Chrome paths to check (in order of priority)
-const CHROME_PATHS = [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-];
+// ─── Auth ────────────────────────────────────────────────────────────────────
 
-function getChromePath(): string {
-    for (const chromePath of CHROME_PATHS) {
-        if (fs.existsSync(chromePath)) {
-            Log.log('Using Chrome at: ' + chromePath);
-            return chromePath;
-        }
+const AUTH_DIR = path.join(__dirname, '..', 'bailey_auth');
+
+// ─── Baileys ESM loader (singleton) ──────────────────────────────────────────
+// Baileys is ESM-only; use Function-wrapping so tsc emits native import()
+// instead of require(), keeping the CommonJS host intact.
+
+type BaileysModule = {
+    makeWASocket: typeof MakeWASocket;
+    useMultiFileAuthState: typeof UseMultiFileAuthState;
+    fetchLatestBaileysVersion: typeof FetchLatestBaileysVersion;
+    makeCacheableSignalKeyStore: typeof MakeCacheableSignalKeyStore;
+    getContentType: typeof GetContentType;
+    DisconnectReason: Record<string, number>;
+    Browsers: { ubuntu: (browser?: string) => [string, string, string] };
+};
+
+const _esmImport = new Function('m', 'return import(m)') as (m: string) => Promise<BaileysModule>;
+let _baileysPromise: Promise<BaileysModule> | null = null;
+
+function getBaileys(): Promise<BaileysModule> {
+    if (!_baileysPromise) {
+        _baileysPromise = _esmImport('@whiskeysockets/baileys');
     }
-    return '';
+    return _baileysPromise;
 }
 
-const RESTART_DELAY_MS = 15_000;
+// ─── Silent pino-compatible logger ───────────────────────────────────────────
+// Suppresses Baileys' verbose JSON stdout; surfaces only errors through our Log.
+
+function makeSilentLogger(): unknown {
+    const noop = () => { };
+    // Suppress decrypt errors from @lid messages; other errors still log
+    const onError = (obj: unknown, msg?: string) => {
+        const text = msg ?? (typeof obj === 'object' ? JSON.stringify(obj) : String(obj));
+        if (text.includes('Bad MAC') || text.includes('failed to decrypt')) return;
+        Log.log('[WA] ' + text);
+    };
+    const logger: Record<string, unknown> = {
+        level: 'silent',
+        trace: noop, debug: noop, info: noop, warn: noop,
+        error: onError, fatal: onError,
+    };
+    logger.child = () => logger;
+    return logger;
+}
+
+// ─── JID helpers ─────────────────────────────────────────────────────────────
+// App-layer IDs use WhatsApp-Web.js convention (@c.us / @g.us).
+// Baileys uses @s.whatsapp.net for users internally.
+
+function toJid(appId: string): string {
+    return appId.endsWith('@c.us') ? appId.replace('@c.us', '@s.whatsapp.net') : appId;
+}
+
+function toAppId(jid: string): string {
+    return jid.endsWith('@s.whatsapp.net') ? jid.replace('@s.whatsapp.net', '@c.us') : jid;
+}
+
+// ─── Message helpers ──────────────────────────────────────────────────────────
+
+function normalizeBase64(value: string): string {
+    const i = value.indexOf(',');
+    return i >= 0 ? value.slice(i + 1) : value;
+}
+
+function readTextBody(
+    getContentType: BaileysModule['getContentType'],
+    content: WAMessageContent | null | undefined,
+): string {
+    if (!content) return '';
+    const kind = getContentType(content);
+    if (!kind) return '';
+    switch (kind) {
+        case 'conversation': return content.conversation ?? '';
+        case 'extendedTextMessage': return content.extendedTextMessage?.text ?? '';
+        case 'imageMessage': return content.imageMessage?.caption ?? '';
+        case 'videoMessage': return content.videoMessage?.caption ?? '';
+        default: return '';
+    }
+}
+
+// ─── Reconnect constants ──────────────────────────────────────────────────────
+
+const BASE_RECONNECT_DELAY_MS = 5_000;
+const MAX_RECONNECT_DELAY_MS = 300_000; // 5 min cap
+const CONNECTION_REPLACED_MIN_DELAY_MS = 120_000;
+const MAX_CONSECUTIVE_CONNECTION_REPLACED = 4;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
-const HEALTH_CHECK_TIMEOUT_MS = 10_000;
-const LOCKFILE_RETRY_COUNT = 6;
-const LOCKFILE_RETRY_DELAY_MS = 1_000;
-const LOCAL_AUTH_CLIENT_ID = 'aba_bot_main';
-const LOCAL_AUTH_DATA_PATH = path.join(__dirname, '..', 'wwebjs_auth');
 
-function getSessionDirectoryPath(): string {
-    return path.join(LOCAL_AUTH_DATA_PATH, `session-${LOCAL_AUTH_CLIENT_ID}`);
-}
+// ─── WhatsApp class ───────────────────────────────────────────────────────────
 
-function sleepSync(ms: number): void {
-    const atomics = new Int32Array(new SharedArrayBuffer(4));
-    Atomics.wait(atomics, 0, 0, ms);
-}
+export class WhatsApp implements WhatsAppClient {
+    private socket: WASocket | null = null;
+    private getContentType: BaileysModule['getContentType'] | null = null;
 
-function escapeForSingleQuotedPowerShell(value: string): string {
-    return value.replace(/'/g, "''");
-}
-
-function killChromeProcessesForSession(sessionDir: string): void {
-    const escapedSessionDir = escapeForSingleQuotedPowerShell(sessionDir);
-    const psCommand = [
-        "$ErrorActionPreference='SilentlyContinue'",
-        `$session='${escapedSessionDir}'`,
-        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\"",
-        "| Where-Object { $_.CommandLine -like \"*${session}*\" }",
-        "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
-    ].join('; ');
-
-    execSync(`powershell -NoProfile -Command \"${psCommand}\"`, { timeout: 10_000, stdio: 'ignore' });
-}
-
-function removeSessionLockFileWithRetries(lockFile: string, sessionDir: string): boolean {
-    for (let attempt = 1; attempt <= LOCKFILE_RETRY_COUNT; attempt++) {
-        if (!fs.existsSync(lockFile)) {
-            return true;
-        }
-
-        try {
-            fs.unlinkSync(lockFile);
-            return true;
-        } catch (error) {
-            const errorCode = (error as NodeJS.ErrnoException).code;
-            if (errorCode !== 'EBUSY' && errorCode !== 'EPERM') {
-                throw error;
-            }
-
-            try {
-                killChromeProcessesForSession(sessionDir);
-            } catch {
-                // Keep retrying lockfile deletion even if process lookup fails.
-            }
-
-            sleepSync(LOCKFILE_RETRY_DELAY_MS);
-        }
-    }
-
-    return !fs.existsSync(lockFile);
-}
-
-export class WhatsApp {
-    private client!: whatsapp.Client;
     private readyPromise!: Promise<void>;
     private readyResolve!: () => void;
     private isReady = false;
     private isRestarting = false;
+    private reconnectAttempt = 0;
+    private connectionState: 'connecting' | 'open' | 'close' = 'close';
     private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
-    private conversation = new Conversation();
+    // Only reset backoff counter after being stably connected for 60s
+    private stableConnectionTimer: ReturnType<typeof setTimeout> | null = null;
+    // Incremented on every init(); handlers from previous sockets check this to self-discard
+    private socketGeneration = 0;
+    private consecutiveConnectionReplaced = 0;
+
+    private readonly conversation = new Conversation();
 
     constructor() {
         this.resetReadyPromise();
-        this.init();
+        void this.init();
     }
 
-    private resetReadyPromise() {
+    // ── Ready-gate ────────────────────────────────────────────────────────────
+
+    private resetReadyPromise(): void {
         this.isReady = false;
         this.readyPromise = new Promise<void>((resolve) => {
             this.readyResolve = resolve;
         });
     }
 
-    private async restart(reason: string) {
+    // ── Reconnect with exponential backoff ────────────────────────────────────
+
+    private reconnectDelayMs(): number {
+        return Math.min(
+            BASE_RECONNECT_DELAY_MS * Math.pow(1.8, this.reconnectAttempt),
+            MAX_RECONNECT_DELAY_MS,
+        );
+    }
+
+    private async restart(reason: string): Promise<void> {
         if (this.isRestarting) return;
         this.isRestarting = true;
         this.resetReadyPromise();
-
-        Log.log(`Restarting WhatsApp client (reason: ${reason})...`);
-
         this.stopHealthCheck();
+        this.terminateSocket();
 
-        try {
-            const clientRef = (this as unknown as { client?: whatsapp.Client }).client;
-            if (clientRef && typeof clientRef.destroy === 'function') {
-                await clientRef.destroy();
-                Log.log('Old client destroyed');
-            } else {
-                Log.log('No active client to destroy before restart');
-            }
-        } catch (e) {
-            Log.log('Error destroying old client: ' + (e as Error).message);
-        }
+        const delay = this.reconnectDelayMs();
+        this.reconnectAttempt++;
+        Log.log(`WhatsApp restarting (${reason}), attempt ${this.reconnectAttempt}, waiting ${Math.round(delay / 1000)}s`);
 
-        // Wait before reinitializing to let network/browser settle
-        await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
+        await new Promise((r) => setTimeout(r, delay));
         this.isRestarting = false;
-        this.init();
+        await this.init();
     }
 
-    private startHealthCheck() {
+    private async restartWithMinDelay(reason: string, minDelayMs: number): Promise<void> {
+        if (this.isRestarting) return;
+        this.isRestarting = true;
+        this.resetReadyPromise();
         this.stopHealthCheck();
-        this.healthCheckTimer = setInterval(() => this.checkHealth(), HEALTH_CHECK_INTERVAL_MS);
+        this.terminateSocket();
+
+        const delay = Math.max(this.reconnectDelayMs(), minDelayMs);
+        this.reconnectAttempt++;
+        Log.log(`WhatsApp restarting (${reason}), attempt ${this.reconnectAttempt}, waiting ${Math.round(delay / 1000)}s`);
+
+        await new Promise((r) => setTimeout(r, delay));
+        this.isRestarting = false;
+        await this.init();
     }
 
-    private stopHealthCheck() {
+    private terminateSocket(): void {
+        if (this.stableConnectionTimer) {
+            clearTimeout(this.stableConnectionTimer);
+            this.stableConnectionTimer = null;
+        }
+        try {
+            // Baileys socket exposes ws.terminate() for immediate hard close
+            (this.socket?.ws as { terminate?: () => void } | undefined)?.terminate?.();
+        } catch { /* ignore */ }
+        this.socket = null;
+        this.connectionState = 'close';
+    }
+
+    // ── Health check ──────────────────────────────────────────────────────────
+
+    private startHealthCheck(): void {
+        this.stopHealthCheck();
+        this.healthCheckTimer = setInterval(() => {
+            if (this.isReady && !this.isRestarting && this.connectionState !== 'open') {
+                void this.restart('health check: connection dropped');
+            }
+        }, HEALTH_CHECK_INTERVAL_MS);
+    }
+
+    private stopHealthCheck(): void {
         if (this.healthCheckTimer) {
             clearInterval(this.healthCheckTimer);
             this.healthCheckTimer = null;
         }
     }
 
-    private async checkHealth() {
-        if (!this.isReady || this.isRestarting) return;
+    // ── Init ──────────────────────────────────────────────────────────────────
 
-        try {
-            const page = this.client.pupPage;
-            if (!page || page.isClosed()) {
-                this.restart('browser page closed');
-                return;
-            }
+    private async init(): Promise<void> {
+        await fs.promises.mkdir(AUTH_DIR, { recursive: true });
 
-            // Evaluate with a timeout to detect frozen/stale browser (e.g. after sleep)
-            const ok = await Promise.race([
-                page.evaluate('navigator.onLine').then(() => true),
-                new Promise<false>((resolve) => setTimeout(() => resolve(false), HEALTH_CHECK_TIMEOUT_MS)),
-            ]);
+        const {
+            makeWASocket,
+            useMultiFileAuthState,
+            fetchLatestBaileysVersion,
+            makeCacheableSignalKeyStore,
+            getContentType,
+            DisconnectReason,
+            Browsers,
+        } = await getBaileys();
 
-            if (!ok) {
-                this.restart('browser not responding (possible sleep/wake)');
-                return;
-            }
+        // Cache getContentType for use in message handlers
+        this.getContentType = getContentType;
 
-            // Check if WhatsApp state is still connected
-            const state = await Promise.race([
-                this.client.getState(),
-                new Promise<null>((resolve) => setTimeout(() => resolve(null), HEALTH_CHECK_TIMEOUT_MS)),
-            ]);
+        const silentLog = makeSilentLogger() as Parameters<typeof makeCacheableSignalKeyStore>[1];
 
-            if (state === null) {
-                this.restart('getState timed out');
-            } else if (state !== 'CONNECTED') {
-                Log.log('WhatsApp state: ' + state);
-                this.restart('WhatsApp state is ' + state);
-            }
-        } catch (e) {
-            Log.log('Health check error: ' + (e as Error).message);
-            this.restart('health check failed');
-        }
-    }
+        // Fetch current WA Web version — avoids "Connection Failure" from stale version
+        const [{ version }, { state, saveCreds }] = await Promise.all([
+            fetchLatestBaileysVersion(),
+            useMultiFileAuthState(AUTH_DIR),
+        ]);
 
-    private init() {
-        const chromePath = getChromePath();
+        Log.log(`Connecting — WA version ${version.join('.')}`);
 
-        // Clean up stale browser lock to prevent "browser is already running" errors on restart
-        const sessionDir = getSessionDirectoryPath();
-        const lockFile = path.join(sessionDir, 'lockfile');
-        if (fs.existsSync(lockFile)) {
-            try {
-                // A present lockfile is often stale; kill any matching Chrome process first.
-                try {
-                    killChromeProcessesForSession(sessionDir);
-                } catch {
-                    // Continue with lockfile cleanup attempts.
-                }
-
-                const removed = removeSessionLockFileWithRetries(lockFile, sessionDir);
-                if (removed) {
-                    Log.log('Removed stale browser lockfile');
-                } else {
-                    Log.log('Could not clear lockfile after retries; continuing with initialization.');
-                }
-            } catch (e) {
-                Log.log('Failed while clearing lockfile, continuing: ' + (e as Error).message);
-            }
-        }
-
-        this.client = new whatsapp.Client({
-            webVersionCache: {
-                type: 'none',
+        const socket = makeWASocket({
+            version,
+            auth: {
+                creds: state.creds,
+                // makeCacheableSignalKeyStore batches key reads for better performance
+                keys: makeCacheableSignalKeyStore(state.keys, silentLog),
             },
-
-            authStrategy: new whatsapp.LocalAuth({
-                dataPath: LOCAL_AUTH_DATA_PATH,
-                clientId: LOCAL_AUTH_CLIENT_ID,
-            }),
-
-            puppeteer: {
-                headless: true,
-                ...(chromePath ? { executablePath: chromePath } : {}),
-                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-            }
+            browser: Browsers.ubuntu('Chrome'),
+            markOnlineOnConnect: false,
+            printQRInTerminal: false,
+            syncFullHistory: false,
+            logger: makeSilentLogger() as Parameters<typeof makeWASocket>[0]['logger'],
+            // Prevents Bad MAC decrypt errors for messages sent before this session was paired.
+            // A bot only needs to read new messages, so returning undefined is correct.
+            getMessage: async () => undefined,
         });
 
-        this.client.on('loading_screen', (percent: string, message: string) => {
-            Log.log(`WhatsApp loading: ${percent}% - ${message}`);
-        });
+        const myGen = ++this.socketGeneration;
+        this.socket = socket;
+        this.connectionState = 'connecting';
 
-        this.client.on('authenticated', () => {
-            Log.log('WhatsApp authenticated!');
-        });
+        socket.ev.on('creds.update', saveCreds);
 
-        this.client.on('auth_failure', (msg: string) => {
-            Log.log('WhatsApp auth failure: ' + msg);
-            this.restart('auth failure');
-        });
-
-        this.client.on('disconnected', (reason: string) => {
-            Log.log('WhatsApp disconnected: ' + reason);
-            this.restart('disconnected: ' + reason);
-        });
-
-        this.client.on('qr', (qr: string) => {
-            Log.log('QR RECEIVED');
-
-            if (process.stdout?.isTTY) {
-                qrcode.generate(qr, { small: true });
-            } else {
-                Log.log('Skipping QR terminal rendering because no interactive console is available.');
-            }
-        });
-
-        this.client.on('ready', async () => {
-            this.isReady = true;
-            this.readyResolve();
-            Log.log('Whatsapp Client is ready!');
-            this.startHealthCheck();
-            this.sendMessage(config.whatsApp.adminChatId, 'Hey admin! This is an automated message.');
-            this.sendMessage(config.whatsApp.testGroupChatId, 'Hey group! This is an automated message.');
-        });
-
-        this.client.on('message', (msg) => this.onMessageReceived(msg));
-
-        this.client.initialize().then(async () => {
-            // Log browser-level info after initialize resolves
-            const page = this.client.pupPage;
-            if (page) {
-                page.on('console', (msg: any) => Log.log('BROWSER CONSOLE: ' + msg.text()));
-                page.on('pageerror', (err: any) => Log.log('BROWSER ERROR: ' + err.message));
-                Log.log('Puppeteer page URL: ' + page.url());
-
-                // Check WWeb version and Store injection status
-                try {
-                    const version = await page.evaluate('window.Debug?.VERSION');
-                    const hasStore = await page.evaluate('typeof window.Store !== "undefined"');
-                    const hasWWebJS = await page.evaluate('typeof window.WWebJS !== "undefined"');
-                    Log.log(`WWeb Version: ${version}, Store injected: ${hasStore}, WWebJS injected: ${hasWWebJS}`);
-                } catch (e) {
-                    Log.log('Failed to check injection status: ' + (e as Error).message);
+        socket.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+            // Stale socket (a new init() has since run) — ignore all events
+            if (this.socketGeneration !== myGen) return;
+            if (qr) {
+                Log.log('QR RECEIVED — scan with WhatsApp (Linked Devices) to authenticate');
+                if (process.stdout?.isTTY) {
+                    qrcode.generate(qr, { small: true });
+                } else {
+                    Log.log('No interactive console — run once from a terminal to scan QR, then restart as service');
                 }
             }
-        }).catch((error) => {
-            Log.log('Failed to initialize WhatsApp client: ' + (error as Error).message);
-            this.restart('init failed');
+
+            if (connection) this.connectionState = connection;
+
+            if (connection === 'open') {
+                this.consecutiveConnectionReplaced = 0;
+                this.isReady = true;
+                this.readyResolve();
+                Log.log('WhatsApp connected!');
+                this.startHealthCheck();
+                // Schedule backoff reset only after being stably connected for 60s.
+                // This prevents the counter from resetting on quick connect→disconnect cycles.
+                if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
+                this.stableConnectionTimer = setTimeout(() => {
+                    this.reconnectAttempt = 0;
+                    this.stableConnectionTimer = null;
+                }, 60_000);
+            }
+
+            if (connection === 'close') {
+                this.isReady = false;
+                const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
+                Log.log(`WhatsApp connection closed (code ${statusCode ?? 'unknown'})`);
+
+                if (statusCode === DisconnectReason.loggedOut) {
+                    Log.log('Logged out — clearing auth state so QR re-scan is possible');
+                    void fs.promises.rm(AUTH_DIR, { recursive: true, force: true })
+                        .finally(() => this.restart('logged out'));
+                    return;
+                }
+
+                // restartRequired (515): emitted after QR scan; reconnect immediately with saved creds
+                if (statusCode === DisconnectReason.restartRequired) {
+                    this.reconnectAttempt = 0;
+                    void this.restart('restart required (QR paired)');
+                    return;
+                }
+
+                if (statusCode === DisconnectReason.connectionReplaced || statusCode === 440) {
+                    this.consecutiveConnectionReplaced++;
+
+                    if (this.consecutiveConnectionReplaced >= MAX_CONSECUTIVE_CONNECTION_REPLACED) {
+                        Log.log('Repeated connectionReplaced (440) — clearing auth state and requiring fresh QR pair');
+                        this.consecutiveConnectionReplaced = 0;
+                        this.reconnectAttempt = 0;
+                        void fs.promises.rm(AUTH_DIR, { recursive: true, force: true })
+                            .finally(() => this.restartWithMinDelay('connection replaced repeatedly', CONNECTION_REPLACED_MIN_DELAY_MS));
+                        return;
+                    }
+
+                    void this.restartWithMinDelay('connection replaced', CONNECTION_REPLACED_MIN_DELAY_MS);
+                    return;
+                }
+
+                void this.restart('connection closed');
+            }
+        });
+
+        socket.ev.on('messages.upsert', ({ messages, type }) => {
+            if (this.socketGeneration !== myGen) return;
+            if (type !== 'notify') return;
+            for (const msg of messages) {
+                void this.onMessageReceived(socket, msg);
+            }
         });
     }
 
-    public async sendMessage(chatId: string, content: whatsapp.MessageContent, options?: whatsapp.MessageSendOptions): Promise<whatsapp.Message | null> {
+    // ── Public send ───────────────────────────────────────────────────────────
+
+    public async sendMessage(chatId: string, payload: OutgoingMessagePayload): Promise<boolean> {
         await this.readyPromise;
+        const socket = this.socket;
+        if (!socket) return false;
+
         try {
-            const sentMessage = await this.client.sendMessage(chatId, content, { sendSeen: false, ...options });
+            const jid = toJid(chatId);
+
+            if (typeof payload === 'string') {
+                await socket.sendMessage(jid, { text: payload });
+            } else {
+                const img = payload as OutgoingImagePayload;
+                await socket.sendMessage(jid, {
+                    image: Buffer.from(normalizeBase64(img.base64), 'base64'),
+                    mimetype: img.mimeType ?? 'image/png',
+                    ...(img.caption ? { caption: img.caption } : {}),
+                });
+            }
 
             if (chatId === config.whatsApp.groupChatId) {
-                this.conversation.recordFamilyGroupAssistantMessage(this.describeOutgoingMessage(content, options));
+                this.conversation.recordFamilyGroupAssistantMessage(this.describePayload(payload));
             }
 
-            return sentMessage;
+            return true;
         } catch (error) {
             Log.log('Error sending message: ' + (error as Error).message);
-            return null;
+            return false;
         }
     }
 
-    private async safeReply(msg: whatsapp.Message, content: string): Promise<void> {
+    // ── Incoming message handler ──────────────────────────────────────────────
+
+    private async onMessageReceived(socket: WASocket, msg: WAMessage): Promise<void> {
+        if (msg.key.fromMe) return;
+
+        const jid = msg.key.remoteJid;
+        // Skip @lid (linked identity) messages that cause decrypt errors
+        if (!jid || jid.endsWith('@lid')) return;
+
+        const isGroup = jid.endsWith('@g.us');
+        const appFrom = toAppId(jid);
+        const author = msg.key.participant;
+        const body = this.getContentType
+            ? readTextBody(this.getContentType, msg.message)
+            : '';
+
+        // Group message: record to family context, do not reply
+        if (isGroup) {
+            if (appFrom === config.whatsApp.groupChatId && author) {
+                await this.markRead(socket, msg);
+                this.conversation.recordFamilyGroupUserMessage(toAppId(author), body);
+            }
+            return;
+        }
+
+        // Private chat
+        await this.markRead(socket, msg);
+        Log.log(`MESSAGE RECEIVED from ${appFrom}`);
+
+        if (!config.whatsApp.users.includes(appFrom)) return;
+
+        const stopTyping = this.startTyping(socket, jid);
         try {
-            if (msg.author) {
-                // Group message - reply in private chat to the author
-                // Convert LID format to phone number if needed
-                const contact = await msg.getContact();
-                const privateChatId = contact.id._serialized;
-                await this.client.sendMessage(privateChatId, content, { quotedMessageId: msg.id._serialized });
-            } else {
-                // Private chat - reply in the same chat with quote
-                const chat = await msg.getChat();
-                await chat.sendMessage(content, { quotedMessageId: msg.id._serialized });
-            }
+            const reply = await this.conversation.generateReply(appFrom, body);
+            await this.reply(socket, msg, reply);
         } catch (error) {
-            Log.log('Error replying to message: ' + (error as Error).message);
+            Log.log('Error generating reply: ' + (error as Error).message);
+        } finally {
+            await stopTyping();
         }
     }
 
-    private async markMessageAsRead(msg: whatsapp.Message): Promise<whatsapp.Chat | null> {
-        const maxAttempts = 3;
-        let chat: whatsapp.Chat | null = null;
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
-        const wait = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-        const isChatRead = async (chatId: string): Promise<boolean> => {
-            try {
-                const chatById = await this.client.getChatById(chatId);
-                const unreadCount = (chatById as unknown as { unreadCount?: number }).unreadCount ?? 0;
-                return unreadCount === 0;
-            } catch {
-                return false;
-            }
-        };
-
-        const directSendSeenAndVerify = async (chatId: string): Promise<boolean> => {
-            const page = this.client.pupPage;
-            if (!page) {
-                return false;
-            }
-
-            return page.evaluate(async (targetChatId: string) => {
-                const browserGlobal = globalThis as typeof globalThis & {
-                    WWebJS: {
-                        getChat: (chatId: string, options?: { getAsModel?: boolean }) => Promise<{ unreadCount?: number } | null>;
-                        sendSeen: (chatId: string) => Promise<boolean>;
-                    };
-                };
-
-                const chat = await browserGlobal.WWebJS.getChat(targetChatId, { getAsModel: false });
-                if (!chat) {
-                    return false;
-                }
-
-                await browserGlobal.WWebJS.sendSeen(targetChatId);
-
-                const verifiedChat = await browserGlobal.WWebJS.getChat(targetChatId, { getAsModel: false });
-                return Boolean(verifiedChat) && Number(verifiedChat?.unreadCount || 0) === 0;
-            }, chatId);
-        };
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            // 1) Preferred path from docs: Client.sendSeen(chatId)
-            try {
-                const sendSeenResult = await this.client.sendSeen(msg.from);
-                if (sendSeenResult && await isChatRead(msg.from)) {
-                    chat = chat ?? await msg.getChat().catch(() => null);
-                    return chat;
-                }
-                Log.log(`Client.sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
-            } catch (error) {
-                Log.log(`Client.sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
-            }
-
-            // 2) Message chat instance path: msg.getChat().sendSeen()
-            try {
-                chat = chat ?? await msg.getChat();
-                const chatSeenResult = await chat.sendSeen();
-                if (chatSeenResult && await isChatRead(msg.from)) {
-                    return chat;
-                }
-                Log.log(`Chat.sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
-            } catch (error) {
-                Log.log(`Chat.sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
-            }
-
-            // 3) Fresh chat instance path: client.getChatById(chatId).sendSeen()
-            try {
-                const chatById = await this.client.getChatById(msg.from);
-                const chatLike = chatById as unknown as { sendSeen?: () => Promise<boolean> };
-                if (typeof chatLike.sendSeen === 'function') {
-                    const byIdResult = await chatLike.sendSeen();
-                    if (byIdResult && await isChatRead(msg.from)) {
-                        chat = chatById as unknown as whatsapp.Chat;
-                        return chat;
-                    }
-                    Log.log(`getChatById().sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
-                }
-            } catch (error) {
-                Log.log(`getChatById().sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
-            }
-
-            // 4) Direct page-level fallback using the same primitives as the library.
-            try {
-                const directResult = await directSendSeenAndVerify(msg.from);
-                if (directResult) {
-                    chat = chat ?? await msg.getChat().catch(() => null);
-                    return chat;
-                }
-                Log.log(`Direct WWebJS.sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
-            } catch (error) {
-                Log.log(`Direct WWebJS.sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
-            }
-
-            // 5) Last resort from docs/issues: sync history then retry direct sendSeen.
-            try {
-                await this.client.syncHistory(msg.from);
-                const syncRetryResult = await directSendSeenAndVerify(msg.from);
-                if (syncRetryResult) {
-                    chat = chat ?? await msg.getChat().catch(() => null);
-                    return chat;
-                }
-                Log.log(`syncHistory + direct sendSeen did not verify read state (attempt ${attempt}/${maxAttempts}) for ${msg.from}`);
-            } catch (error) {
-                Log.log(`syncHistory + direct sendSeen failed (attempt ${attempt}/${maxAttempts}): ${(error as Error).message}`);
-            }
-
-            if (attempt < maxAttempts) {
-                await wait(400);
-            }
+    private async reply(socket: WASocket, msg: WAMessage, text: string): Promise<void> {
+        try {
+            const jid = msg.key.remoteJid;
+            if (!jid) return;
+            await socket.sendMessage(jid, { text }, { quoted: msg });
+        } catch (error) {
+            Log.log('Error replying: ' + (error as Error).message);
         }
-
-        Log.log('Unable to mark message as read after retries for ' + msg.from);
-        return chat;
     }
 
-    private startTypingIndicator(chat: whatsapp.Chat): () => Promise<void> {
-        void chat.sendStateTyping().catch((error) => {
-            Log.log('Error setting typing state: ' + (error as Error).message);
-        });
+    private async markRead(socket: WASocket, msg: WAMessage): Promise<void> {
+        try {
+            await socket.readMessages([msg.key]);
+        } catch (error) {
+            Log.log('Error marking as read: ' + (error as Error).message);
+        }
+    }
 
-        const timer = setInterval(() => {
-            void chat.sendStateTyping().catch((error) => {
-                Log.log('Error refreshing typing state: ' + (error as Error).message);
-            });
-        }, 8_000);
-
+    private startTyping(socket: WASocket, jid: string): () => Promise<void> {
+        void socket.sendPresenceUpdate('composing', jid).catch(() => { });
+        const timer = setInterval(
+            () => void socket.sendPresenceUpdate('composing', jid).catch(() => { }),
+            8_000,
+        );
         return async () => {
             clearInterval(timer);
-            try {
-                await chat.clearState();
-            } catch (error) {
-                Log.log('Error clearing typing state: ' + (error as Error).message);
-            }
+            await socket.sendPresenceUpdate('paused', jid).catch(() => { });
         };
     }
 
-    private async onMessageReceived(msg: whatsapp.Message) {
-        // Ignore newsletter/channel messages
-        if (msg.from.endsWith('@newsletter')) {
-            return;
-        }
-
-        if (msg.from === config.whatsApp.groupChatId && msg.author) {
-            await this.markMessageAsRead(msg);
-
-            let senderId = msg.author;
-
-            try {
-                const contact = await msg.getContact();
-                const contactInfo = contact as unknown as {
-                    number?: string;
-                };
-
-                if (contactInfo.number?.trim()) {
-                    senderId = `${contactInfo.number.trim()}@c.us`;
-                }
-            } catch (error) {
-                Log.log('Error resolving group sender contact: ' + (error as Error).message);
-            }
-
-            this.conversation.recordFamilyGroupUserMessage(senderId, msg.body);
-        }
-
-        // Ignore group messages — only reply to private chats
-        if (msg.author) {
-            return;
-        }
-
-        const chat = await this.markMessageAsRead(msg);
-
-        Log.log('MESSAGE RECEIVED:');
-        Log.log('msg.from:' + msg.from);
-
-        // Check authorization (private chat only)
-        if (!config.whatsApp.users.includes(msg.from)) {
-            return;
-        }
-
-        const stopTyping = chat ? this.startTypingIndicator(chat) : null;
-
-        try {
-            const reply = await this.conversation.generateReply(msg.from, msg.body);
-            await this.safeReply(msg, reply);
-        } catch (error) {
-            Log.log('Error generating AI reply: ' + (error as Error).message);
-        } finally {
-            if (stopTyping) {
-                await stopTyping();
-            }
-        }
-    }
-
-    private describeOutgoingMessage(content: whatsapp.MessageContent, options?: whatsapp.MessageSendOptions): string {
-        if (typeof content === 'string') {
-            return content;
-        }
-
-        if (options?.caption) {
-            return `[image] ${options.caption}`;
-        }
-
-        return '[image]';
+    private describePayload(payload: OutgoingMessagePayload): string {
+        if (typeof payload === 'string') return payload;
+        return payload.caption ? `[image] ${payload.caption}` : '[image]';
     }
 }
