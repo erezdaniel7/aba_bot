@@ -1,12 +1,15 @@
 import moment from 'moment';
 
-import { buildDailyVariationInstructions, buildRecentDailyMemorySection } from './aiBehavior';
 import { AiMessageGenerator } from './aiMessageGenerator';
 import { AiMetrics } from './aiMetrics';
 import { Calendar, CalendarMessageData } from './calendar';
-import { ChatHistory } from './chatHistory';
-import { config } from './config';
 import { FamilyContext } from './familyContext';
+import { Log } from './log';
+
+interface DailyEventExtras {
+    wishes: Record<number, string>;
+    messageExtension: string;
+}
 
 export class Message {
     private calendar = new Calendar();
@@ -20,116 +23,161 @@ export class Message {
             daysAhead: 1,
         });
 
-        const message = useAI
-            ? await this.buildMessageWithAI(data)
-            : this.buildMessage(data);
+        const message = await this.buildMessage(data, useAI);
 
         this.aiMetrics.recordDailyMessage(message);
         return message;
     }
 
-    private buildMessage(data: CalendarMessageData): string {
-        let message = '';
+    private async buildMessage(data: CalendarMessageData, useAI: boolean): Promise<string> {
+        const sections: string[] = [];
 
-        message = data.heDate + ' ' + data.formattedDate + '\n';
-        if (data.holiday) message += '✡' + data.holiday + '✡\n';
-        message += '\n';
+        sections.push(`📅 ${data.heDate} | ${data.formattedDate}`);
+
+        if (data.sabbathTime?.['Parsha']) {
+            sections.push(`📖 פרשת השבוע: ${data.sabbathTime['Parsha']}`);
+        }
 
         if (data.sabbathTime) {
-            if (data.sabbathTime['Parsha']) message += '📜' + data.sabbathTime['Parsha'] + '📜' + "\n";
-            message += '🕯הדלקת נרות: ' + data.sabbathTime['CandleLightingTime'].format('HH:mm') + '🕯' + "\n" +
-                '🌟צאת שבת: ' + data.sabbathTime['HavdalahTime'].format('HH:mm') + '🌟' + "\n\n";
+            sections.push(
+                `🕯️ הדלקת נרות ${data.sabbathTime['CandleLightingTime'].format('HH:mm')} | צאת שבת ${data.sabbathTime['HavdalahTime'].format('HH:mm')}`
+            );
         }
 
-        if (data.events.length === 0) {
-            message += "אין אירועים היום! 🎉🎉";
+        if (data.holiday) {
+            sections.push(`✡️ ${data.holiday}`);
         }
-        else {
-            message += "📅בוקר טוב! הנה האירועים של היום:\n";
-            message += data.events.map((event) => {
-                return '🔹' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
-            }).join('\n');
+
+        const extras = useAI
+            ? await this.generateEventExtras(data)
+            : { wishes: {}, messageExtension: '' } as DailyEventExtras;
+
+        if (data.events.length === 0) {
+            sections.push('אין אירועים היום.');
+        } else {
+            const eventLines = data.events.map((event, index) => {
+                const wish = extras.wishes[index + 1];
+                const wishSuffix = wish ? ` - ${wish}` : '';
+                return `🔹 ${this.formatEventLine(event)}${wishSuffix}`;
+            });
+            sections.push(['📌 אירועים:', ...eventLines].join('\n'));
         }
 
         if (data.sabbathTime && data.tomorrowEvents.length > 0) {
-            message += '\n\n📅 ואלו של מחר:\n';
-            message += data.tomorrowEvents.map((event) => {
-                return '🔹' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
-            }).join('\n');
+            const tomorrowLines = data.tomorrowEvents.map((event) => `🔹 ${this.formatEventLine(event)}`);
+            sections.push(['📆 אירועי מחר:', ...tomorrowLines].join('\n'));
         }
 
-        message += '\n\nזיכרו! ההודעה הזו קבועה אבל היומן תמיד מעודכן!! 😎';
+        if (extras.messageExtension) {
+            sections.push(extras.messageExtension);
+        }
 
-        message += '\n\nשיהיה לכם יום נהדר! 🌞';
-
-        return message;
+        return sections.join('\n\n');
     }
 
-    private getRecentDailyMemorySection(): string {
-        const chatHistory = new ChatHistory();
-        const relevantChatIds = [config.whatsApp.groupChatId, config.whatsApp.testGroupChatId]
-            .filter((chatId, index, chatIds) => Boolean(chatId) && chatIds.indexOf(chatId) === index);
-
-        const recentGroupMessages = relevantChatIds.flatMap((chatId) => {
-            return chatHistory.getHistory(chatId, { limit: 20 })
-                .filter((entry) => entry.role === 'assistant')
-                .map((entry) => entry.content);
-        });
-
-        return buildRecentDailyMemorySection(recentGroupMessages, 3);
+    private normalizeEventSummary(summary: string): string {
+        return summary
+            .replace(/\s+/g, ' ')
+            .replace(/[!]{2,}/g, '!')
+            .trim();
     }
 
-    private async buildMessageWithAI(data: CalendarMessageData): Promise<string> {
+    private formatEventLine(event: CalendarMessageData['events'][number]): string {
+        const eventSummary = this.normalizeEventSummary(event.summary ?? 'אירוע');
+
+        if (event.datetype === 'date') {
+            return eventSummary;
+        }
+
+        return `${moment(event.start).format('HH:mm')} - ${eventSummary}`;
+    }
+
+    private async generateEventExtras(data: CalendarMessageData): Promise<DailyEventExtras> {
+        const emptyExtras: DailyEventExtras = { wishes: {}, messageExtension: '' };
+
+        const eventsList = data.events.length > 0
+            ? data.events.map((event, index) => `${index + 1}. ${this.formatEventLine(event)}`).join('\n')
+            : 'אין אירועים היום.';
+
         const familyContextSection = this.familyContext.buildPromptSection();
-        const variationInstructions = buildDailyVariationInstructions(data.formattedDate);
-        const recentDailyMemorySection = this.getRecentDailyMemorySection();
-        const systemPrompt = `אתה "אבא בוט" בוט וואטסאפ ידידותי ששולח הודעות בוקר יומיות בעברית לקבוצה משפחתית.
-זהות מחייבת: אתה תמיד מזדהה רק כ"אבא בוט".
-"אבא בוט" אינו בן משפחה אנושי, ו"אבא" הוא קשר משפחתי של אדם.
-לעולם אל תחתום או תתאר את עצמך כאדם מהמשפחה או כווריאציה אנושית של "אבא".
-צור הודעת בוקר חמה, טבעית ומגוונת על בסיס המידע שתקבל.
-השתמש באימוג'ים בצורה טבעית, אבל לא בהגזמה.
-שמור על הפורמט הבא: תאריך עברי ולועזי, חג (אם יש), זמני שבת (אם יש), אירועים (אם יש), וברכת יום טוב.
-הוסף משפט מעניין או ציטוט קצר שמתאים ליום.
-אל תחזור על אותה פתיחה, אותה ברכה או אותו רעיון פעמיים באותה הודעה או ימים רבים ברצף.
-אם אין אירועים היום, העדף ניסוח קצר ורענן במקום טקסט ממלא.${recentDailyMemorySection ? `
-
-${recentDailyMemorySection}` : ''}${variationInstructions ? `
-
-${variationInstructions}` : ''}${familyContextSection ? `
+        const systemPrompt = `אתה "אבא בוט", בוט משפחתי שמכין את החלקים האנושיים של הודעת בוקר יומית בעברית.
+מבנה ההודעה קבוע ונבנה אוטומטית, ולכן עליך להוסיף אך ורק שני דברים, בעברית תקינה ובטון חם וקצר:
+1. "wishes": ברכה קצרה לאירועים שבאמת מתאימים לה (למשל "בהצלחה", "מזל טוב", "רפואה שלמה", "נסיעה טובה"). מותר לשלב אימוג'י בודד ומתאים בברכה אם הוא תורם. אם אירוע לא דורש ברכה, אל תכלול אותו כלל. אם אין אירועים, החזר אובייקט ריק.
+2. "messageExtension": משפט סיום קצר אחד (עד כ-20 מילים) שמסיים את ההודעה בחום. זה יכול להיות משהו שקשור לאירועי היום, אנקדוטה קצרה שקשורה לאירועים או למשפחה, או פשוט ברכת בוקר טוב. תמיד החזר כאן טקסט לא ריק. מותר לשלב אימוג'ים בודדים ומתאימים.
+אל תמציא אירועים, שעות או פרטים. אל תגזים באימוג'ים. אל תחזור על שם האירוע בתוך הברכה.
+החזר JSON תקין בלבד, ללא טקסט נוסף, במבנה המדויק:
+{"wishes": {"<מספר האירוע>": "<הברכה>"}, "messageExtension": "<משפט סיום>"}${familyContextSection ? `
 
 ${familyContextSection}` : ''}`;
 
-        let prompt = `הנה המידע להודעת הבוקר של היום:\n`;
-        prompt += `תאריך עברי: ${data.heDate}\n`;
-        prompt += `תאריך לועזי: ${data.formattedDate}\n`;
-        if (data.holiday) prompt += `חג/מועד: ${data.holiday}\n`;
-        if (data.sabbathTime) {
-            if (data.sabbathTime['Parsha']) prompt += `פרשת השבוע: ${data.sabbathTime['Parsha']}\n`;
-            prompt += `הדלקת נרות: ${data.sabbathTime['CandleLightingTime'].format('HH:mm')}\n`;
-            prompt += `הבדלה: ${data.sabbathTime['HavdalahTime'].format('HH:mm')}\n`;
+        const prompt = `אירועי היום:\n${eventsList}\n\nהחזר JSON בלבד לפי ההנחיות.`;
+
+        try {
+            const raw = await this.aiMessageGenerator.generateMessage(prompt, systemPrompt, [], [], {
+                temperature: 0.7,
+                topP: 0.9,
+                maxTokens: 250,
+            });
+
+            return this.parseEventExtras(raw, data.events.length);
+        } catch (error) {
+            Log.log('Failed to generate daily event extras: ' + (error as Error).message);
+            return emptyExtras;
         }
-        if (data.events.length === 0) {
-            prompt += `אין אירועים היום.\n`;
-        } else {
-            prompt += `אירועים היום:\n`;
-            prompt += data.events.map((event) => {
-                return '- ' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
-            }).join('\n') + '\n';
-        }
-        if (data.tomorrowEvents.length > 0) {
-            prompt += `אירועים מחר:\n`;
-            prompt += data.tomorrowEvents.map((event) => {
-                return '- ' + (event.datetype === 'date' ? '' : moment(event.start).format('HH:mm') + ' - ') + event.summary;
-            }).join('\n') + '\n';
+    }
+
+    private parseEventExtras(raw: string, eventCount: number): DailyEventExtras {
+        const emptyExtras: DailyEventExtras = { wishes: {}, messageExtension: '' };
+
+        const jsonText = this.extractJsonObject(raw);
+        if (!jsonText) {
+            return emptyExtras;
         }
 
-        return this.aiMessageGenerator.generateMessage(prompt, systemPrompt, [], [], {
-            temperature: 1.05,
-            topP: 0.95,
-            frequencyPenalty: 0.45,
-            presencePenalty: 0.2,
-            maxTokens: 420,
-        });
+        try {
+            const parsed = JSON.parse(jsonText) as { wishes?: unknown; messageExtension?: unknown };
+            const wishes: Record<number, string> = {};
+
+            if (parsed.wishes && typeof parsed.wishes === 'object') {
+                for (const [key, value] of Object.entries(parsed.wishes as Record<string, unknown>)) {
+                    const index = Number(key);
+                    if (
+                        Number.isInteger(index) &&
+                        index >= 1 &&
+                        index <= eventCount &&
+                        typeof value === 'string' &&
+                        value.trim()
+                    ) {
+                        wishes[index] = value.trim();
+                    }
+                }
+            }
+
+            const messageExtension = typeof parsed.messageExtension === 'string'
+                ? parsed.messageExtension.trim()
+                : '';
+
+            return { wishes, messageExtension };
+        } catch (error) {
+            Log.log('Failed to parse daily event extras JSON: ' + (error as Error).message);
+            return emptyExtras;
+        }
+    }
+
+    private extractJsonObject(raw: string): string | null {
+        if (!raw) {
+            return null;
+        }
+
+        const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+        const candidate = fenced ? fenced[1] : raw;
+        const start = candidate.indexOf('{');
+        const end = candidate.lastIndexOf('}');
+
+        if (start === -1 || end === -1 || end <= start) {
+            return null;
+        }
+
+        return candidate.slice(start, end + 1);
     }
 }

@@ -1,4 +1,4 @@
-import moment from 'moment';
+import moment from 'moment-timezone';
 
 import { isLowSignalFamilyGroupMessage, shouldUpdateUserSummary } from './aiBehavior';
 import { AiMessageGenerator } from './aiMessageGenerator';
@@ -12,6 +12,8 @@ import { Log } from './log';
 import { UserSummaryStore } from './userSummaryStore';
 
 const MAX_CALENDAR_LOOKAHEAD_DAYS = 30;
+const ISRAEL_TIMEZONE = 'Asia/Jerusalem';
+const HEBREW_WEEKDAYS = ['יום ראשון', 'יום שני', 'יום שלישי', 'יום רביעי', 'יום חמישי', 'יום שישי', 'שבת'];
 const FAMILY_GROUP_HISTORY_LIMIT = 8;
 const PRIVATE_HISTORY_LIMIT = 12;
 const USER_SUMMARY_MAX_LENGTH = 1200;
@@ -38,6 +40,8 @@ export class Conversation {
             { excludePhoneNumber: userId, maxResults: 2 },
         );
         const userSummaryUpdatedAt = this.userSummaryStore.getUpdatedAt(userId);
+        const now = moment().tz(ISRAEL_TIMEZONE);
+        const currentDateTime = `${HEBREW_WEEKDAYS[now.day()]}, ${now.format('YYYY-MM-DD')}, השעה ${now.format('HH:mm')} (שעון ישראל)`;
         const systemPrompt = `אתה "אבא בוט" בוט וואטסאפ ידידותי של משפחה ישראלית. אתה עונה בעברית.
     זהות מחייבת: אתה "אבא בוט".
     אין חובה להזדהות בכל תשובה, אבל כשכן מזדהים - ההזדהות היא רק כ"אבא בוט".
@@ -49,7 +53,9 @@ export class Conversation {
 אם השאלה לא קשורה ללוח, ענה בצורה כללית וידידותית.
 אם אפשר לענות בלי לוח השנה, אל תקרא לכלי.
 
-היום הוא ${moment().format('YYYY-MM-DD')}.
+עכשיו ${currentDateTime}. התחשב בתאריך, ביום בשבוע ובשעה הנוכחיים כדי להבין את ההקשר המלא של ההודעה (בוקר/צהריים/ערב/לילה, סוף שבוע, ערב חג וכו').
+השעה הנוכחית לעיל היא מקור האמת. כשאתה משווה אותה לשעות של אירועים, הדלקת נרות או הבדלה, השווה מספרית לפי HH:mm ואל תסתמך על תחושה.
+שים לב: שבת או חג נכנסים רק בשעת הדלקת הנרות ומסתיימים בהבדלה. כל עוד השעה הנוכחית מוקדמת משעת הדלקת הנרות, עדיין לא נכנסה שבת/החג - גם אם כבר אחר הצהריים או ערב. אל תכריז ש"כבר אחרי הדלקת נרות" לפני שהשעה הנוכחית עברה את שעת ההדלקה.
 אתה יכול לבקש נתוני לוח שנה לתאריך מסוים ולטווח מסוים של ימים.${familyContextSection ? `
 
 ${familyContextSection}` : ''}${userSummary ? `

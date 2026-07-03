@@ -336,7 +336,9 @@ export class WhatsApp implements WhatsAppClient {
 
         socket.ev.on('messages.upsert', ({ messages, type }) => {
             if (this.socketGeneration !== myGen) return;
-            if (type !== 'notify') return;
+            // `append` includes messages synced after temporary transport gaps.
+            // Handling only `notify` can miss real inbound user messages.
+            if (type !== 'notify' && type !== 'append') return;
             for (const msg of messages) {
                 void this.onMessageReceived(socket, msg);
             }
