@@ -74,11 +74,29 @@ export class Calendar {
                 if (event.rrule) {
                     const occurrences = event.rrule.between(start.toDate(), moment(end).add(1, 'second').toDate());
 
+                    // node-ical parses all-day (VALUE=DATE) values at local midnight but keys
+                    // `recurrences`/`exdate` by their UTC date, which is shifted one day back in
+                    // positive-UTC-offset timezones (e.g. Asia/Jerusalem). RRULE occurrences, on
+                    // the other hand, are emitted at UTC midnight. Comparing the raw keys therefore
+                    // fails, causing overridden all-day occurrences to leak through as duplicate or
+                    // phantom events. Build a timezone-safe set of overridden/excluded occurrence
+                    // dates: use the local date for date-only values and the UTC date otherwise.
+                    const normalizeDateKey = (value: any): string =>
+                        value?.dateOnly ? moment(value).format('YYYY-MM-DD') : moment.utc(value).format('YYYY-MM-DD');
+
+                    const overriddenDates = new Set<string>();
+                    for (const recurrence of Object.values(event.recurrences ?? {})) {
+                        overriddenDates.add(normalizeDateKey((recurrence as any).recurrenceid ?? recurrence.start));
+                    }
+                    for (const excluded of Object.values(event.exdate ?? {})) {
+                        overriddenDates.add(normalizeDateKey(excluded));
+                    }
+
                     if (occurrences.length > 0) {
                         occurrences.forEach((occurrence) => {
                             const occurrenceDate = moment.utc(occurrence).format('YYYY-MM-DD');
 
-                            if (!event.recurrences?.[occurrenceDate] && !event.exdate?.[occurrenceDate]) {
+                            if (!overriddenDates.has(occurrenceDate)) {
                                 let adjustedStart: Date;
 
                                 if (event.rrule?.options.tzid) {

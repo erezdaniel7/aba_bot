@@ -166,6 +166,23 @@ describe('Calendar', () => {
         expect(events[1].start).toStrictEqual(new Date('2025-06-15T18:00:00.000Z'));
     });
 
+    it('should not duplicate an all-day recurring event that has a same-day override', async () => {
+        const events = await calendar.getDailyEvents(new Date('2024-08-04'));
+        const matching = events.filter((event) => event.summary === 'all day recurring with moved override');
+
+        expect(matching.length).toBe(1);
+    });
+
+    it('should not show an all-day recurring occurrence that was moved to another day', async () => {
+        const movedFrom = (await calendar.getDailyEvents(new Date('2024-08-08')))
+            .filter((event) => event.summary === 'all day recurring with moved override');
+        expect(movedFrom.length).toBe(0);
+
+        const movedTo = (await calendar.getDailyEvents(new Date('2024-08-09')))
+            .filter((event) => event.summary === 'all day recurring with moved override');
+        expect(movedTo.length).toBe(1);
+    });
+
 
 });
 
@@ -370,6 +387,45 @@ LAST-MODIFIED:20240521T230115Z
 SEQUENCE:0
 STATUS:CONFIRMED
 SUMMARY:repeat all day event
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;VALUE=DATE:20240804
+DTEND;VALUE=DATE:20240805
+RRULE:FREQ=WEEKLY;WKST=SU;UNTIL=20240816;BYDAY=SU,MO,WE,TH
+DTSTAMP:20240521T230137Z
+UID:allday-moved-override@google.com
+CREATED:20240521T230103Z
+LAST-MODIFIED:20240521T230115Z
+SEQUENCE:0
+STATUS:CONFIRMED
+SUMMARY:all day recurring with moved override
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;VALUE=DATE:20240804
+DTEND;VALUE=DATE:20240805
+DTSTAMP:20240521T230137Z
+UID:allday-moved-override@google.com
+RECURRENCE-ID;VALUE=DATE:20240804
+CREATED:20240521T230103Z
+LAST-MODIFIED:20240521T230115Z
+SEQUENCE:1
+STATUS:CONFIRMED
+SUMMARY:all day recurring with moved override
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;VALUE=DATE:20240809
+DTEND;VALUE=DATE:20240810
+DTSTAMP:20240521T230137Z
+UID:allday-moved-override@google.com
+RECURRENCE-ID;VALUE=DATE:20240808
+CREATED:20240521T230103Z
+LAST-MODIFIED:20240521T230115Z
+SEQUENCE:2
+STATUS:CONFIRMED
+SUMMARY:all day recurring with moved override
 TRANSP:TRANSPARENT
 END:VEVENT
 END:VCALENDAR
